@@ -1,0 +1,19 @@
+{
+  "name": "geo-monitoring-browser-debugger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Visible Playwright launchers for manually debugging domestic AI web clients.",
+  "scripts": {
+    "test": "node --test",
+    "open:deepseek": "node src/cli.js deepseek",
+    "open:doubao": "node src/cli.js doubao",
+    "open:kimi": "node src/cli.js kimi"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.57.0"
+  }
+}

@@ -19,6 +19,7 @@ export function normalizeCitations(anchors, responseUrl) {
 
       const originalUrl = url.toString();
       const citationFragment = url.hash.startsWith('#:~:text=') ? originalUrl : null;
+      const isInlineCitation = citationFragment || (anchor.hasCitationMarker && !anchor.className);
       if (citationFragment) url.hash = '';
       const canonicalUrl = url.toString();
       const title = anchor.text.replace(/\s+/g, ' ').trim();
@@ -28,6 +29,7 @@ export function normalizeCitations(anchors, responseUrl) {
         if (citationFragment && !existing.citationFragments.includes(citationFragment)) {
           existing.citationFragments.push(citationFragment);
         }
+        if (isInlineCitation) existing.citationOccurrences += 1;
         continue;
       }
 
@@ -37,6 +39,7 @@ export function normalizeCitations(anchors, responseUrl) {
         url: canonicalUrl,
         domain: url.hostname.replace(/^www\./, ''),
         citationFragments: citationFragment ? [citationFragment] : [],
+        citationOccurrences: isInlineCitation ? 1 : 0,
       };
       citations.push(citation);
       citationByUrl.set(canonicalUrl, citation);
@@ -92,6 +95,8 @@ export async function captureCitations(page, { platformId, runDirectory }) {
   const anchors = await page.locator('a[href]').evaluateAll((nodes) => nodes.map((node) => ({
     href: node.href,
     text: (node.textContent || '').trim(),
+    className: typeof node.className === 'string' ? node.className : '',
+    hasCitationMarker: Boolean(node.querySelector('.ds-markdown-cite')),
   })));
   const citations = normalizeCitations(anchors, page.url());
   const citationPath = path.join(runDirectory, 'citations.json');
@@ -103,7 +108,7 @@ export async function captureCitations(page, { platformId, runDirectory }) {
     sourcePanelOpened,
     platformReportedCount,
     citations,
-    citationOccurrences: citations.reduce((total, citation) => total + citation.citationFragments.length, 0),
+    citationOccurrences: citations.reduce((total, citation) => total + citation.citationOccurrences, 0),
   }, null, 2)}\n`, 'utf8');
   await page.screenshot({ path: screenshotPath });
 
@@ -111,7 +116,7 @@ export async function captureCitations(page, { platformId, runDirectory }) {
     citationPath,
     screenshot: path.basename(screenshotPath),
     count: citations.length,
-    citationOccurrences: citations.reduce((total, citation) => total + citation.citationFragments.length, 0),
+    citationOccurrences: citations.reduce((total, citation) => total + citation.citationOccurrences, 0),
     sourcePanelOpened,
     platformReportedCount,
   };

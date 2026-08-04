@@ -18,6 +18,7 @@ test('keeps unique external source URLs and assigns citation positions', () => {
       url: 'https://www.example.com/article?id=1',
       domain: 'example.com',
       citationFragments: [],
+      citationOccurrences: 0,
     },
     {
       position: 2,
@@ -25,6 +26,7 @@ test('keeps unique external source URLs and assigns citation positions', () => {
       url: 'https://news.example.org/story',
       domain: 'news.example.org',
       citationFragments: [],
+      citationOccurrences: 0,
     },
   ]);
 });
@@ -40,6 +42,17 @@ test('groups Kimi text-fragment citations by their original source page', () => 
   assert.equal(citations[0].url, 'https://news.example.org/article');
   assert.equal(citations[0].title, 'Full source title');
   assert.equal(citations[0].citationFragments.length, 2);
+  assert.equal(citations[0].citationOccurrences, 2);
+});
+
+test('counts DeepSeek citation tags without URL text fragments', () => {
+  const citations = normalizeCitations([
+    { href: 'https://news.example.org/article', text: '-1', hasCitationMarker: true },
+    { href: 'https://news.example.org/article', text: 'Source title', className: 'source-card' },
+  ], 'https://chat.deepseek.com/a/chat/s/1');
+
+  assert.equal(citations[0].citationOccurrences, 1);
+  assert.equal(citations[0].title, 'Source title');
 });
 
 test('reads the source count following the platform-specific source label', () => {

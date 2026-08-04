@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { resolveBrowserExecutable } from './browser.js';
+import { captureCitations } from './citations.js';
 import { createRunArtifacts, writeRunRecord } from './run-artifacts.js';
 import { getPlatform } from './platforms.js';
 
@@ -81,6 +82,7 @@ async function launchAndAsk(platformId, question, dataDirectory) {
     submissionMethod: null,
     currentUrl: null,
     screenshots: [],
+    citations: null,
     error: null,
   };
 
@@ -128,6 +130,12 @@ async function launchAndAsk(platformId, question, dataDirectory) {
     if (page.isClosed()) return;
     try {
       await screenshot(label);
+      const citations = await captureCitations(page, {
+        platformId: platform.id,
+        runDirectory: artifacts.runDirectory,
+      });
+      record.citations = citations;
+      await persist();
     } catch (error) {
       console.error(`${platform.label}: could not save ${label}: ${error.message}`);
     }

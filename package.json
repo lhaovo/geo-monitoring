@@ -8,7 +8,8 @@
     "test": "node --test",
     "open:deepseek": "node src/cli.js deepseek",
     "open:doubao": "node src/cli.js doubao",
-    "open:kimi": "node src/cli.js kimi"
+    "open:kimi": "node src/cli.js kimi",
+    "ask": "node src/ask.js"
   },
   "engines": {
     "node": ">=20"

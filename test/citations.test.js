@@ -17,14 +17,29 @@ test('keeps unique external source URLs and assigns citation positions', () => {
       title: 'Detailed source title',
       url: 'https://www.example.com/article?id=1',
       domain: 'example.com',
+      citationFragments: [],
     },
     {
       position: 2,
       title: 'Second source',
       url: 'https://news.example.org/story',
       domain: 'news.example.org',
+      citationFragments: [],
     },
   ]);
+});
+
+test('groups Kimi text-fragment citations by their original source page', () => {
+  const citations = normalizeCitations([
+    { href: 'https://news.example.org/article#:~:text=first', text: '' },
+    { href: 'https://news.example.org/article#:~:text=second', text: '' },
+    { href: 'https://news.example.org/article', text: 'Full source title' },
+  ], 'https://www.kimi.com/chat/1');
+
+  assert.equal(citations.length, 1);
+  assert.equal(citations[0].url, 'https://news.example.org/article');
+  assert.equal(citations[0].title, 'Full source title');
+  assert.equal(citations[0].citationFragments.length, 2);
 });
 
 test('reads the source count following the platform-specific source label', () => {

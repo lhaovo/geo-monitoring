@@ -4,6 +4,7 @@ import path from 'node:path';
 const SOURCE_TRIGGER_PATTERNS = Object.freeze({
   deepseek: /\d+\s*\u4e2a\u7f51\u9875/,
   doubao: /\u53c2\u8003\s*\d+\s*\u7bc7\u8d44\u6599/,
+  kimi: /\u5f15\u7528/,
 });
 
 export function normalizeCitations(anchors, responseUrl) {
@@ -16,11 +17,17 @@ export function normalizeCitations(anchors, responseUrl) {
       const url = new URL(anchor.href);
       if (!['http:', 'https:'].includes(url.protocol) || url.hostname === responseHost) continue;
 
+      const originalUrl = url.toString();
+      const citationFragment = url.hash.startsWith('#:~:text=') ? originalUrl : null;
+      if (citationFragment) url.hash = '';
       const canonicalUrl = url.toString();
       const title = anchor.text.replace(/\s+/g, ' ').trim();
       const existing = citationByUrl.get(canonicalUrl);
       if (existing) {
         if (title.length > existing.title.length) existing.title = title;
+        if (citationFragment && !existing.citationFragments.includes(citationFragment)) {
+          existing.citationFragments.push(citationFragment);
+        }
         continue;
       }
 
@@ -29,6 +36,7 @@ export function normalizeCitations(anchors, responseUrl) {
         title,
         url: canonicalUrl,
         domain: url.hostname.replace(/^www\./, ''),
+        citationFragments: citationFragment ? [citationFragment] : [],
       };
       citations.push(citation);
       citationByUrl.set(canonicalUrl, citation);
@@ -95,6 +103,7 @@ export async function captureCitations(page, { platformId, runDirectory }) {
     sourcePanelOpened,
     platformReportedCount,
     citations,
+    citationOccurrences: citations.reduce((total, citation) => total + citation.citationFragments.length, 0),
   }, null, 2)}\n`, 'utf8');
   await page.screenshot({ path: screenshotPath });
 
@@ -102,6 +111,7 @@ export async function captureCitations(page, { platformId, runDirectory }) {
     citationPath,
     screenshot: path.basename(screenshotPath),
     count: citations.length,
+    citationOccurrences: citations.reduce((total, citation) => total + citation.citationFragments.length, 0),
     sourcePanelOpened,
     platformReportedCount,
   };

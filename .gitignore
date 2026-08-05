@@ -2,3 +2,4 @@ node_modules/
 data/
 playwright-report/
 test-results/
+web/dist/

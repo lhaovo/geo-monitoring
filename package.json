@@ -1,20 +1,32 @@
 {
-  "name": "geo-monitoring-browser-debugger",
+  "name": "geo-monitoring",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Visible Playwright launchers for manually debugging domestic AI web clients.",
+  "description": "Browser-automation-based GEO monitoring for domestic AI platforms.",
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
     "test": "node --test",
     "open:deepseek": "node src/cli.js deepseek",
     "open:doubao": "node src/cli.js doubao",
     "open:kimi": "node src/cli.js kimi",
-    "ask": "node src/ask.js"
+    "open:qwen": "node src/cli.js qwen",
+    "open:yuanbao": "node src/cli.js yuanbao",
+    "ask": "node src/ask.js",
+    "dev": "node src/index.js",
+    "start": "node src/index.js",
+    "web": "npm run dev --workspace web",
+    "build:web": "npm run build --workspace web"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@fastify/static": "^10.1.2",
+    "better-sqlite3": "^12.11.1",
+    "fastify": "^5.11.2",
     "playwright": "^1.57.0"
   }
 }

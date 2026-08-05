@@ -13,6 +13,11 @@ test('returns DeepSeek configuration with its chat entry URL', () => {
 test('rejects an unsupported platform with the supported ids', () => {
   assert.throws(
     () => getPlatform('unknown'),
-    /Unsupported platform "unknown"\. Supported platforms: deepseek, doubao, kimi/,
+    /Unsupported platform "unknown"\. Supported platforms: deepseek, doubao, kimi, qwen, yuanbao/,
   );
+});
+
+test('returns Qwen and Yuanbao web entry URLs', () => {
+  assert.equal(getPlatform('qwen').entryUrl, 'https://www.qianwen.com/');
+  assert.equal(getPlatform('yuanbao').entryUrl, 'https://yuanbao.tencent.com/chat/');
 });

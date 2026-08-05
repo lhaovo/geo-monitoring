@@ -5,7 +5,7 @@ const platformId = process.argv[2];
 
 try {
   if (!platformId) {
-    throw new Error('Usage: node src/cli.js <deepseek|doubao|kimi>');
+    throw new Error('Usage: node src/cli.js <deepseek|doubao|kimi|qwen|yuanbao>');
   }
 
   await launchPlatform(getPlatform(platformId));

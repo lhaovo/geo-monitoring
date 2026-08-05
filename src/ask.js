@@ -5,7 +5,7 @@ import { captureCitations } from './citations.js';
 import { createRunArtifacts, writeRunRecord } from './run-artifacts.js';
 import { getPlatform } from './platforms.js';
 
-const PLATFORM_IDS = ['deepseek', 'doubao', 'kimi'];
+const PLATFORM_IDS = ['deepseek', 'doubao', 'kimi', 'qwen', 'yuanbao'];
 const INPUT_SELECTORS = [
   'textarea:not([disabled])',
   '[contenteditable="true"][role="textbox"]',

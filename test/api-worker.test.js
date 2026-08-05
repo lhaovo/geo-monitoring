@@ -1,0 +1,363 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import Database from 'better-sqlite3';
+import { buildServer } from '../src/api/server.js';
+import { openDatabase } from '../src/db/database.js';
+import { buildSubmittedQuestion, SEARCH_PROMPT_SUFFIX } from '../src/infrastructure/platform-runner.js';
+
+async function json(app, options) {
+  const response = await app.inject(options);
+  return { response, body: response.body ? response.json() : null };
+}
+
+test('creates a project, queues a run, and persists an answer with citations', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
+  const executedModes = [];
+  const executedSearchHints = [];
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async ({ platformRun, mode, appendSearchPrompt }) => {
+      executedModes.push([platformRun.platformId, mode]);
+      executedSearchHints.push(appendSearchPrompt);
+      return {
+      content: `回答：${platformRun.prompt.text}`,
+      responseUrl: `https://example.test/${platformRun.platformId}`,
+      sourcePanelOpened: true,
+      platformReportedCount: 1,
+      citations: [{
+        position: 1,
+        title: '示例网页',
+        url: 'https://source.example.com/article',
+        domain: 'source.example.com',
+        citationFragments: [],
+        citationOccurrences: 2,
+      }],
+      artifacts: [{ kind: 'screenshot', relativePath: 'test/screenshot.png' }],
+      };
+    },
+  });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '药品监测' } });
+    assert.equal(project.response.statusCode, 201);
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '哪个牌子更稳？' },
+    });
+    assert.equal(prompt.response.statusCode, 201);
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: {
+        projectId: project.body.id,
+        promptIds: [prompt.body.id],
+        platforms: ['deepseek', 'kimi'],
+        mode: 'headless',
+        platformModes: { deepseek: 'headless', kimi: 'headed' },
+        appendSearchPrompt: true,
+      },
+    });
+    assert.equal(run.response.statusCode, 202);
+    await app.geo.worker.whenIdle();
+
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.status, 'completed');
+    assert.equal(detail.body.concurrency, 3);
+    assert.equal(detail.body.appendSearchPrompt, true);
+    assert.equal(detail.body.platformRuns.length, 2);
+    assert.deepEqual(detail.body.platformRuns.map((item) => [item.platformId, item.mode]), [
+      ['deepseek', 'headless'],
+      ['kimi', 'headed'],
+    ]);
+    assert.deepEqual(executedModes, [['deepseek', 'headless'], ['kimi', 'headed']]);
+    assert.deepEqual(executedSearchHints, [true, true]);
+    assert.equal(detail.body.platformRuns[0].answer.citations[0].citationOccurrences, 2);
+    assert.equal(detail.body.platformRuns[1].answer.artifacts[0].relativePath, 'test/screenshot.png');
+    const answer = await json(app, { method: 'GET', url: `/api/answers/${detail.body.platformRuns[0].answer.id}` });
+    assert.equal(answer.body.platformId, 'deepseek');
+    const citation = await json(app, { method: 'GET', url: `/api/citations/${answer.body.citations[0].id}` });
+    assert.equal(citation.body.domain, 'source.example.com');
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('builds the optional search prompt suffix without changing the original question', () => {
+  assert.equal(buildSubmittedQuestion('  原始问题  '), '原始问题');
+  assert.equal(buildSubmittedQuestion('原始问题', true), `原始问题\n\n${SEARCH_PROMPT_SUFFIX}`);
+});
+
+test('runs a global concurrency pool while serializing each platform', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-concurrency-'));
+  let activeCount = 0;
+  let maxActiveCount = 0;
+  let samePlatformOverlap = false;
+  let crossPromptOverlap = false;
+  const activePlatforms = new Set();
+  const activePromptCounts = new Map();
+  const firstPromptId = { value: null };
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async ({ platformRun }) => {
+      if (activePlatforms.has(platformRun.platformId)) samePlatformOverlap = true;
+      if ([...activePromptCounts.keys()].some((promptId) => promptId !== platformRun.promptId)) crossPromptOverlap = true;
+      activePlatforms.add(platformRun.platformId);
+      activePromptCounts.set(platformRun.promptId, (activePromptCounts.get(platformRun.promptId) ?? 0) + 1);
+      activeCount += 1;
+      maxActiveCount = Math.max(maxActiveCount, activeCount);
+      const delay = platformRun.promptId === firstPromptId.value && platformRun.platformId === 'deepseek' ? 80 : 20;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      activeCount -= 1;
+      activePlatforms.delete(platformRun.platformId);
+      const promptCount = (activePromptCounts.get(platformRun.promptId) ?? 1) - 1;
+      if (promptCount > 0) activePromptCounts.set(platformRun.promptId, promptCount);
+      else activePromptCounts.delete(platformRun.promptId);
+      return {
+        content: '并发测试回答',
+        responseUrl: 'https://example.test/answer',
+        sourcePanelOpened: false,
+        platformReportedCount: null,
+        citations: [],
+        artifacts: [],
+      };
+    },
+  });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '并发测试' } });
+    const promptOne = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '问题一' },
+    });
+    const promptTwo = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '问题二' },
+    });
+    firstPromptId.value = promptOne.body.id;
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: {
+        projectId: project.body.id,
+        promptIds: [promptOne.body.id, promptTwo.body.id],
+        platforms: ['deepseek', 'kimi', 'doubao'],
+        concurrency: 3,
+      },
+    });
+    assert.equal(run.response.statusCode, 202);
+    await app.geo.worker.whenIdle();
+    assert.equal(maxActiveCount, 3);
+    assert.equal(samePlatformOverlap, false);
+    assert.equal(crossPromptOverlap, true);
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.status, 'completed');
+    assert.equal(detail.body.concurrency, 3);
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('migrates an existing SQLite platform_runs table to platform-level modes', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
+  const databasePath = path.join(dataDirectory, 'geo-monitoring.sqlite');
+  const legacyDatabase = new Database(databasePath);
+  legacyDatabase.exec(`CREATE TABLE runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    target_platforms_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    cancel_requested_at TEXT
+  );
+  CREATE TABLE platform_runs (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    prompt_id TEXT NOT NULL,
+    platform_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, prompt_id, platform_id)
+  )`);
+  legacyDatabase.close();
+  const migratedDatabase = openDatabase(databasePath);
+  try {
+    const mode = migratedDatabase.pragma('table_info(platform_runs)').find((column) => column.name === 'mode');
+    assert.equal(mode.notnull, 1);
+    assert.equal(mode.dflt_value, "'headless'");
+    const concurrency = migratedDatabase.pragma('table_info(runs)').find((column) => column.name === 'concurrency');
+    assert.equal(concurrency.notnull, 1);
+    assert.equal(concurrency.dflt_value, '3');
+    const appendSearchPrompt = migratedDatabase.pragma('table_info(runs)').find((column) => column.name === 'append_search_prompt');
+    assert.equal(appendSearchPrompt.notnull, 1);
+    assert.equal(appendSearchPrompt.dflt_value, '0');
+  } finally {
+    migratedDatabase.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a run containing an unsupported platform before it enters the queue', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
+  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '项目' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['unknown'], mode: 'headless' },
+    });
+    assert.equal(run.response.statusCode, 400);
+    assert.match(run.body.message, /不支持的平台/);
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a mode configured for a platform outside the task', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
+  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '项目' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: {
+        projectId: project.body.id,
+        promptIds: [prompt.body.id],
+        platforms: ['deepseek'],
+        platformModes: { doubao: 'headed' },
+      },
+    });
+    assert.equal(run.response.statusCode, 400);
+    assert.match(run.body.message, /未选择的平台/);
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('validates run concurrency between one and six', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-concurrency-validation-'));
+  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '并发校验' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '问题' },
+    });
+    for (const concurrency of [0, 2.5, 7]) {
+      const run = await json(app, {
+        method: 'POST', url: '/api/runs',
+        payload: {
+          projectId: project.body.id,
+          promptIds: [prompt.body.id],
+          platforms: ['deepseek'],
+          concurrency,
+        },
+      });
+      assert.equal(run.response.statusCode, 400);
+      assert.match(run.body.message, /concurrency/);
+    }
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('uses headed mode only for Doubao by default', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-platform-defaults-'));
+  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  try {
+    const status = await json(app, { method: 'GET', url: '/api/platforms/status' });
+    const modes = Object.fromEntries(status.body.map((platform) => [platform.id, platform.defaultMode]));
+    assert.equal(modes.doubao, 'headed');
+    assert.equal(modes.qwen, 'headless');
+    assert.equal(modes.yuanbao, 'headless');
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('serves evidence only from the dedicated artifacts directory', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
+  await mkdir(path.join(dataDirectory, 'artifacts', 'run-1'), { recursive: true });
+  await writeFile(path.join(dataDirectory, 'artifacts', 'run-1', 'evidence.txt'), 'evidence', 'utf8');
+  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  try {
+    const response = await app.inject({ method: 'GET', url: '/artifacts/run-1/evidence.txt' });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body, 'evidence');
+    const protectedResponse = await app.inject({ method: 'GET', url: '/artifacts/../geo-monitoring.sqlite' });
+    assert.equal(protectedResponse.statusCode, 404);
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('calculates brand mention rate and keeps source evidence for brand monitoring', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-brand-'));
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async () => ({
+      content: '这类需求可以考虑千威，回答同时保留原始来源。',
+      responseUrl: 'https://example.test/answer',
+      sourcePanelOpened: true,
+      platformReportedCount: 1,
+      citations: [{
+        position: 1,
+        title: '品牌使用说明',
+        url: 'https://source.example.com/guide',
+        domain: 'source.example.com',
+        citationFragments: [],
+        citationOccurrences: 1,
+      }],
+      artifacts: [],
+    }),
+  });
+  try {
+    const brand = await json(app, {
+      method: 'POST',
+      url: '/api/brands',
+      payload: { name: '千威', aliases: ['千威牌'], products: ['西地那非'] },
+    });
+    const questions = await json(app, {
+      method: 'POST',
+      url: `/api/brands/${brand.body.id}/questions`,
+      payload: { texts: ['第一次买哪个牌子更稳？'], category: '购买决策' },
+    });
+    const run = await json(app, {
+      method: 'POST',
+      url: '/api/monitoring-runs',
+      payload: {
+        brandId: brand.body.id,
+        questionIds: [questions.body.questions[0].id],
+        platforms: ['deepseek'],
+        platformModes: { deepseek: 'headless' },
+      },
+    });
+    await app.geo.worker.whenIdle();
+    const overview = await json(app, { method: 'GET', url: `/api/brands/${brand.body.id}/overview?days=30` });
+    assert.equal(overview.body.summary.completed, 1);
+    assert.equal(overview.body.summary.mentioned, 1);
+    assert.equal(overview.body.summary.mentionRate, 100);
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.platformRuns[0].answer.brandMentioned, true);
+    assert.deepEqual(detail.body.platformRuns[0].answer.matchedTerms, ['千威']);
+    const sources = await json(app, { method: 'GET', url: `/api/brands/${brand.body.id}/sources?days=30` });
+    assert.equal(sources.body.summary.uniqueUrls, 1);
+    assert.deepEqual(sources.body.sources[0].platforms, ['deepseek']);
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});

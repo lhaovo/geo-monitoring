@@ -155,6 +155,53 @@ test('runs a global concurrency pool while serializing each platform', async () 
   }
 });
 
+test('force-cancels active browser work and marks the run immediately', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-cancel-'));
+  let executionStarted = false;
+  let abortObserved = false;
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async ({ signal }) => {
+      executionStarted = true;
+      await new Promise((resolve, reject) => {
+        if (signal.aborted) {
+          abortObserved = true;
+          reject(new Error('browser closed'));
+          return;
+        }
+        signal.addEventListener('abort', () => {
+          abortObserved = true;
+          reject(new Error('browser closed'));
+        }, { once: true });
+      });
+    },
+  });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '取消测试' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '会被取消的问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['kimi'] },
+    });
+    for (let attempt = 0; attempt < 20 && !executionStarted; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(executionStarted, true);
+
+    const cancelled = await json(app, { method: 'POST', url: `/api/runs/${run.body.id}/cancel` });
+    assert.equal(cancelled.response.statusCode, 200);
+    assert.equal(cancelled.body.status, 'cancelled');
+    assert.equal(abortObserved, true);
+    assert.equal(cancelled.body.cancelRequestedAt !== null, true);
+    assert.equal(cancelled.body.completedChecks, 0);
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.platformRuns[0].status, 'cancelled');
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
 test('migrates an existing SQLite platform_runs table to platform-level modes', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
   const databasePath = path.join(dataDirectory, 'geo-monitoring.sqlite');

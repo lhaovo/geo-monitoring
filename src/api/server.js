@@ -137,7 +137,11 @@ export function buildServer({
   });
   app.get('/api/runs/:runId', async (request) => repo.getRunDetail(request.params.runId));
   app.get('/api/runs/:runId/answers', async (request) => repo.getRunDetail(request.params.runId).platformRuns);
-  app.post('/api/runs/:runId/cancel', async (request) => repo.requestCancellation(request.params.runId));
+  app.post('/api/runs/:runId/cancel', async (request) => {
+    const run = repo.requestCancellation(request.params.runId);
+    await runWorker.cancelRun(request.params.runId);
+    return repo.getRun(run.id);
+  });
   app.get('/api/runs/:runId/events', async (request) => repo.listEvents(request.params.runId));
   app.get('/api/answers/:answerId', async (request) => repo.getAnswer(request.params.answerId));
   app.get('/api/answers/:answerId/citations', async (request) => repo.getAnswer(request.params.answerId).citations);

@@ -45,6 +45,19 @@ test('groups Kimi text-fragment citations by their original source page', () => 
   assert.equal(citations[0].citationOccurrences, 2);
 });
 
+test('keeps Kimi source-panel links while counting a regular inline citation', () => {
+  const citations = normalizeCitations([
+    { href: 'https://source.example/article', text: '来源卡片', className: 'kimi-source-card' },
+    {
+      href: 'https://source.example/article', text: '', className: 'pua-ref-cite-tag', isInlineCitation: true,
+    },
+  ], 'https://www.kimi.com/chat/1');
+
+  assert.equal(citations.length, 1);
+  assert.equal(citations[0].title, '来源卡片');
+  assert.equal(citations[0].citationOccurrences, 1);
+});
+
 test('counts DeepSeek citation tags without URL text fragments', () => {
   const citations = normalizeCitations([
     { href: 'https://news.example.org/article', text: '-1', hasCitationMarker: true },
@@ -58,5 +71,6 @@ test('counts DeepSeek citation tags without URL text fragments', () => {
 test('reads the source count following the platform-specific source label', () => {
   assert.equal(parsePlatformReportedCount('deepseek', '12 个网页'), 12);
   assert.equal(parsePlatformReportedCount('doubao', '搜索 4 个关键词，参考 17 篇资料'), 17);
+  assert.equal(parsePlatformReportedCount('kimi', '引用来源 8'), 8);
   assert.equal(parsePlatformReportedCount('kimi', '参考 3 篇资料'), null);
 });

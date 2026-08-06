@@ -75,7 +75,7 @@ export function createChatPlatformAdapter({ id, label, entryUrl, responseSelecto
     async submitQuestion(page, question) {
       return submitQuestion(page, question);
     },
-    async waitForAnswer(page, { timeoutMs = 180_000, stableForMs = 4_000 } = {}) {
+    async waitForAnswer(page, { timeoutMs = 300_000, stableForMs = 4_000 } = {}) {
       const deadline = Date.now() + timeoutMs;
       let previous = '';
       let stableSince = null;

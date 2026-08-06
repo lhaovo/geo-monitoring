@@ -12,6 +12,13 @@ export function buildSubmittedQuestion(question, appendSearchPrompt = false) {
   return appendSearchPrompt ? `${text}\n\n${SEARCH_PROMPT_SUFFIX}` : text;
 }
 
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error('监控任务已取消。');
+  error.name = 'CancellationError';
+  throw error;
+}
+
 async function capturePage(page, directory, name) {
   const screenshotPath = path.join(directory, `${name}.png`);
   const htmlPath = path.join(directory, `${name}.html`);
@@ -22,13 +29,19 @@ async function capturePage(page, directory, name) {
   return { screenshotPath, htmlPath };
 }
 
-export async function executePlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt = false, emit }) {
+export async function executePlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt = false, emit, signal }) {
+  throwIfAborted(signal);
   const artifacts = await createPlatformRunArtifacts(paths, platformRun.runId, platformRun.id, adapter.id);
   const browserContext = await chromium.launchPersistentContext(artifacts.profileDirectory, {
     executablePath: resolveBrowserExecutable(),
     headless: mode === 'headless',
     viewport: { width: 1440, height: 960 },
   });
+  let abortClosePromise = null;
+  const closeOnAbort = () => {
+    abortClosePromise ??= browserContext.close().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', closeOnAbort, { once: true });
   const page = browserContext.pages()[0] ?? await browserContext.newPage();
   const savedArtifacts = [];
   const saveSnapshot = async (name) => {
@@ -40,16 +53,21 @@ export async function executePlatformRun({ platformRun, adapter, paths, mode, ap
   };
 
   try {
+    throwIfAborted(signal);
     emit(`打开 ${adapter.label} 页面。`);
     await page.goto(adapter.entryUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    throwIfAborted(signal);
     await saveSnapshot('01-opened');
     const submittedQuestion = buildSubmittedQuestion(platformRun.prompt.text, appendSearchPrompt);
     const submissionMethod = await adapter.submitQuestion(page, submittedQuestion);
+    throwIfAborted(signal);
     emit(`问题已提交（${submissionMethod}），等待回答。`);
     await saveSnapshot('02-submitted');
     const content = await adapter.waitForAnswer(page);
+    throwIfAborted(signal);
     await saveSnapshot('03-answer');
     const citationResult = await captureCitations(page, { platformId: adapter.id, runDirectory: artifacts.directory });
+    throwIfAborted(signal);
     savedArtifacts.push(
       { kind: 'citations', relativePath: relativeArtifactPath(paths, citationResult.citationPath) },
       { kind: 'screenshot', relativePath: relativeArtifactPath(paths, path.join(artifacts.directory, citationResult.screenshot)) },
@@ -75,6 +93,8 @@ export async function executePlatformRun({ platformRun, adapter, paths, mode, ap
     error.artifacts = savedArtifacts;
     throw error;
   } finally {
-    await browserContext.close();
+    signal?.removeEventListener('abort', closeOnAbort);
+    if (abortClosePromise) await abortClosePromise;
+    else await browserContext.close();
   }
 }

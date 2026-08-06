@@ -481,6 +481,11 @@ export class GeoRepository {
     this.database.prepare(`UPDATE platform_runs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?`).run(errorMessage, now(), platformRunId);
   }
 
+  cancelPlatformRun(platformRunId) {
+    this.database.prepare(`UPDATE platform_runs SET status = 'cancelled', error_message = NULL, completed_at = ?
+      WHERE id = ? AND status IN ('queued', 'running')`).run(now(), platformRunId);
+  }
+
   addArtifacts(platformRunId, artifacts) {
     if (!artifacts?.length) return;
     const timestamp = now();
@@ -498,7 +503,8 @@ export class GeoRepository {
   }
 
   requestCancellation(runId) {
-    this.getRun(runId);
+    const run = this.getRun(runId);
+    if (!['queued', 'running'].includes(run.status)) return run;
     this.database.prepare(`UPDATE runs SET cancel_requested_at = ?, status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END WHERE id = ?`).run(now(), runId);
     this.database.prepare("UPDATE platform_runs SET status = 'cancelled', completed_at = ? WHERE run_id = ? AND status = 'queued'").run(now(), runId);
     return this.getRun(runId);

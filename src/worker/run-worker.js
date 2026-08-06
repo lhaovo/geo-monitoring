@@ -11,6 +11,20 @@ export class RunWorker extends EventEmitter {
     this.queue = [];
     this.processing = false;
     this.idleWaiters = [];
+    this.activeRunStates = new Map();
+  }
+
+  async cancelRun(runId) {
+    const state = this.activeRunStates.get(runId);
+    if (!state) return;
+    state.cancelling = true;
+    for (const controller of state.controllers) controller.abort();
+    const activeTasks = [...state.tasks];
+    if (!activeTasks.length) return;
+    await Promise.race([
+      Promise.allSettled(activeTasks),
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
+    ]);
   }
 
   enqueue(runId) {
@@ -47,12 +61,18 @@ export class RunWorker extends EventEmitter {
   async processRun(runId) {
     const run = this.repository.getRun(runId);
     if (run.status === 'cancelled' || this.repository.isCancellationRequested(runId)) return;
-    this.repository.startRun(runId);
-    this.emitEvent({ runId, message: `监测任务开始执行，全局最多并发 ${run.concurrency} 项，同平台最多运行 1 项${run.appendSearchPrompt ? '，已附加搜索提示词' : ''}。` });
-    const platformRuns = this.repository.getPendingPlatformRuns(runId);
-    await this.processPlatformRuns(runId, platformRuns, run.concurrency, run.appendSearchPrompt);
-    const completed = this.repository.finishRun(runId);
-    this.emitEvent({ runId, message: `监测任务结束，状态：${completed.status}。` });
+    const state = { controllers: new Set(), tasks: new Set(), cancelling: false };
+    this.activeRunStates.set(runId, state);
+    try {
+      this.repository.startRun(runId);
+      this.emitEvent({ runId, message: `监测任务开始执行，全局最多并发 ${run.concurrency} 项，同平台最多运行 1 项${run.appendSearchPrompt ? '，已附加搜索提示词' : ''}。` });
+      const platformRuns = this.repository.getPendingPlatformRuns(runId);
+      await this.processPlatformRuns(runId, platformRuns, run.concurrency, run.appendSearchPrompt);
+      const completed = this.repository.finishRun(runId);
+      this.emitEvent({ runId, message: `监测任务结束，状态：${completed.status}。` });
+    } finally {
+      this.activeRunStates.delete(runId);
+    }
   }
 
   async processPlatformRuns(runId, platformRuns, concurrency, appendSearchPrompt) {
@@ -70,8 +90,10 @@ export class RunWorker extends EventEmitter {
         task = this.processPlatformRun(runId, platformRun, appendSearchPrompt).finally(() => {
           runningPlatforms.delete(platformRun.platformId);
           activeTasks.delete(task);
+          this.activeRunStates.get(runId)?.tasks.delete(task);
         });
         activeTasks.add(task);
+        this.activeRunStates.get(runId)?.tasks.add(task);
       }
     };
 
@@ -88,7 +110,14 @@ export class RunWorker extends EventEmitter {
   }
 
   async processPlatformRun(runId, platformRun, appendSearchPrompt) {
-    if (this.repository.isCancellationRequested(runId)) return;
+    const controller = new AbortController();
+    const state = this.activeRunStates.get(runId);
+    state?.controllers.add(controller);
+    if (this.repository.isCancellationRequested(runId)) {
+      this.repository.cancelPlatformRun(platformRun.id);
+      state?.controllers.delete(controller);
+      return;
+    }
     this.repository.startPlatformRun(platformRun.id);
     this.emitEvent({ runId, platformRunId: platformRun.id, message: `开始执行 ${platformRun.platformId}。` });
     try {
@@ -99,14 +128,28 @@ export class RunWorker extends EventEmitter {
         paths: this.paths,
         mode: platformRun.mode,
         appendSearchPrompt,
+        signal: controller.signal,
         emit: (message) => this.emitEvent({ runId, platformRunId: platformRun.id, message }),
       });
+      if (controller.signal.aborted || this.repository.isCancellationRequested(runId)) {
+        this.repository.addArtifacts(platformRun.id, result.artifacts);
+        this.repository.cancelPlatformRun(platformRun.id);
+        this.emitEvent({ runId, platformRunId: platformRun.id, message: `${platformRun.platformId} 已强制取消。` });
+        return;
+      }
       this.repository.completePlatformRun(platformRun.id, result);
       this.emitEvent({ runId, platformRunId: platformRun.id, message: `${adapter.label} 回答与引用已保存。` });
     } catch (error) {
       this.repository.addArtifacts(platformRun.id, error.artifacts);
-      this.repository.failPlatformRun(platformRun.id, error.message);
-      this.emitEvent({ runId, platformRunId: platformRun.id, level: 'error', message: `${platformRun.platformId} 执行失败：${error.message}` });
+      if (controller.signal.aborted || this.repository.isCancellationRequested(runId)) {
+        this.repository.cancelPlatformRun(platformRun.id);
+        this.emitEvent({ runId, platformRunId: platformRun.id, message: `${platformRun.platformId} 已强制取消。` });
+      } else {
+        this.repository.failPlatformRun(platformRun.id, error.message);
+        this.emitEvent({ runId, platformRunId: platformRun.id, level: 'error', message: `${platformRun.platformId} 执行失败：${error.message}` });
+      }
+    } finally {
+      state?.controllers.delete(controller);
     }
   }
 }

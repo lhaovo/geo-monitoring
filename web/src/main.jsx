@@ -12,11 +12,12 @@ const PLATFORM_META = {
 };
 
 const STATUS_LABELS = {
-  queued: '排队中', running: '执行中', completed: '已完成', partial_failed: '部分失败', failed: '失败', cancelled: '已取消',
+  queued: '排队中', running: '执行中', cancelling: '取消中', completed: '已完成', partial_failed: '部分失败', failed: '失败', cancelled: '已取消',
 };
 
 function platformLabel(id) { return PLATFORM_META[id]?.label || id || '未知平台'; }
 function statusLabel(status) { return STATUS_LABELS[status] || status || '未知'; }
+function displayRunStatus(run) { return run?.cancelRequestedAt && ['queued', 'running'].includes(run.status) ? 'cancelling' : run?.status; }
 function formatTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'; }
 function formatRate(value) { return value === null || value === undefined ? '—' : `${value}%`; }
 function formatCount(value) { return Number(value || 0).toLocaleString('zh-CN'); }
@@ -119,7 +120,7 @@ function QuestionsPage({ questions, onReload, onNewRun }) {
 function RunsPage({ runs, activeRun, onOpenRun, onCancel, onNewRun, onSelectCell }) {
   return <>
     <PageHeader eyebrow="MONITORING RUNS" title="监控任务" description="每个任务由多个问题和平台检查组成，点击进入问题 × 平台结果矩阵。" actions={<button className="button primary" onClick={onNewRun}>＋ 新建任务</button>} />
-    <section className="card runs-list">{runs.length ? runs.map((run) => <button className={`run-list-row ${activeRun?.id === run.id ? 'selected' : ''}`} key={run.id} onClick={() => onOpenRun(run.id)}><div className="run-date"><StatusPill status={run.status} /><strong>{formatTime(run.createdAt)}</strong></div><div className="run-progress"><div className="progress-line"><span style={{ width: `${progressPercent(run)}%` }} /></div><small>{run.completedChecks} / {run.totalChecks} 检查完成</small></div><div className="run-platforms">{run.targetPlatforms.map((id) => <PlatformBadge key={id} id={id} />)}</div><div className="run-stats"><span>{run.mentionedChecks} 次提及</span><span>{run.citationCount} 条引用</span></div>{['queued', 'running'].includes(run.status) && <span className="run-cancel" onClick={(event) => { event.stopPropagation(); onCancel(run.id); }}>取消</span>}</button>) : <EmptyState title="还没有监控任务" description="选择问题和平台，发起第一轮品牌监控。" action={<button className="button primary" onClick={onNewRun}>发起监控</button>} />}</section>
+    <section className="card runs-list">{runs.length ? runs.map((run) => <button className={`run-list-row ${activeRun?.id === run.id ? 'selected' : ''}`} key={run.id} onClick={() => onOpenRun(run.id)}><div className="run-date"><StatusPill status={displayRunStatus(run)} /><strong>{formatTime(run.createdAt)}</strong></div><div className="run-progress"><div className="progress-line"><span style={{ width: `${progressPercent(run)}%` }} /></div><small>{run.completedChecks} / {run.totalChecks} 检查完成</small></div><div className="run-platforms">{run.targetPlatforms.map((id) => <PlatformBadge key={id} id={id} />)}</div><div className="run-stats"><span>{run.mentionedChecks} 次提及</span><span>{run.citationCount} 条引用</span></div>{['queued', 'running'].includes(run.status) && <span className="run-cancel" onClick={(event) => { event.stopPropagation(); onCancel(run.id); }}>{run.cancelRequestedAt ? '取消中…' : '取消'}</span>}</button>) : <EmptyState title="还没有监控任务" description="选择问题和平台，发起第一轮品牌监控。" action={<button className="button primary" onClick={onNewRun}>发起监控</button>} />}</section>
     {activeRun && <RunDetail run={activeRun} onSelectCell={onSelectCell} onCancel={onCancel} />}
   </>;
 }
@@ -130,7 +131,7 @@ function RunDetail({ run, onSelectCell, onCancel }) {
     for (const item of run.platformRuns || []) { if (!map.has(item.promptId)) map.set(item.promptId, { id: item.promptId, prompt: item.prompt, cells: {} }); map.get(item.promptId).cells[item.platformId] = item; }
     return [...map.values()];
   }, [run]);
-  return <section className="card run-detail"><div className="detail-header"><div><div className="page-eyebrow">TASK DETAIL</div><h3>{formatTime(run.createdAt)} 的监控任务</h3><p>{run.completedChecks}/{run.totalChecks} 检查完成 · {run.mentionedChecks} 个回答提到品牌 · {run.citationCount} 条引用</p></div><div className="detail-actions"><StatusPill status={run.status} />{['queued', 'running'].includes(run.status) && <button className="button danger-outline" onClick={() => onCancel(run.id)}>取消任务</button>}</div></div><div className="detail-progress"><div className="progress-line large"><span style={{ width: `${progressPercent(run)}%` }} /></div><span>{progressPercent(run)}%</span></div><div className="matrix-wrap"><table className="matrix"><thead><tr><th>监控问题</th>{run.targetPlatforms.map((id) => <th key={id}><PlatformBadge id={id} /></th>)}</tr></thead><tbody>{grouped.map((row) => <tr key={row.id}><td><strong>{row.prompt?.text || '未知问题'}</strong><small>{row.prompt?.category || '未分类'}</small></td>{run.targetPlatforms.map((id) => <td key={id}><button className={`matrix-cell ${row.cells[id]?.status || 'queued'}`} onClick={() => row.cells[id] && onSelectCell(row.cells[id])}>{row.cells[id] ? <><StatusPill status={row.cells[id].status} />{row.cells[id].answer ? <span className={row.cells[id].answer.brandMentioned ? 'mention yes' : 'mention'}>{row.cells[id].answer.brandMentioned ? '已提及' : '未提及'}</span> : null}<small>{row.cells[id].answer ? `${row.cells[id].answer.citations.length} 条来源` : row.cells[id].errorMessage || '等待执行'}</small></> : <span>—</span>}</button></td>)}</tr>)}</tbody></table></div></section>;
+  return <section className="card run-detail"><div className="detail-header"><div><div className="page-eyebrow">TASK DETAIL</div><h3>{formatTime(run.createdAt)} 的监控任务</h3><p>{run.completedChecks}/{run.totalChecks} 检查完成 · {run.mentionedChecks} 个回答提到品牌 · {run.citationCount} 条引用</p></div><div className="detail-actions"><StatusPill status={displayRunStatus(run)} />{['queued', 'running'].includes(run.status) && <button className="button danger-outline" onClick={() => onCancel(run.id)}>{run.cancelRequestedAt ? '取消中…' : '取消任务'}</button>}</div></div><div className="detail-progress"><div className="progress-line large"><span style={{ width: `${progressPercent(run)}%` }} /></div><span>{progressPercent(run)}%</span></div><div className="matrix-wrap"><table className="matrix"><thead><tr><th>监控问题</th>{run.targetPlatforms.map((id) => <th key={id}><PlatformBadge id={id} /></th>)}</tr></thead><tbody>{grouped.map((row) => <tr key={row.id}><td><strong>{row.prompt?.text || '未知问题'}</strong><small>{row.prompt?.category || '未分类'}</small></td>{run.targetPlatforms.map((id) => <td key={id}><button className={`matrix-cell ${row.cells[id]?.status || 'queued'}`} onClick={() => row.cells[id] && onSelectCell(row.cells[id])}>{row.cells[id] ? <><StatusPill status={row.cells[id].status} />{row.cells[id].answer ? <span className={row.cells[id].answer.brandMentioned ? 'mention yes' : 'mention'}>{row.cells[id].answer.brandMentioned ? '已提及' : '未提及'}</span> : null}<small>{row.cells[id].answer ? `${row.cells[id].answer.citations.length} 条来源` : row.cells[id].errorMessage || '等待执行'}</small></> : <span>—</span>}</button></td>)}</tr>)}</tbody></table></div></section>;
 }
 
 function SourcesPage({ sources, onReload }) {
@@ -288,7 +289,16 @@ function App() {
   const selectBrand = (id) => { const selected = brands.find((item) => item.id === id); setBrand(selected); setActiveRun(null); navigate('overview'); };
   const createBrand = async (body) => { const created = await api.createBrand(body); const next = [created, ...brands]; setBrands(next); setBrand(created); setModal(null); navigate('overview'); };
   const createRun = async (body) => { const run = await api.createMonitoringRun(body); setRuns((items) => [run, ...items]); setModal(null); setActiveRun(run); navigate('runs', run.id); };
-  const cancelRun = async (id) => { try { const run = await api.cancelRun(id); setActiveRun(run); setRuns((items) => items.map((item) => item.id === id ? run : item)); } catch (cause) { setError(cause.message); } };
+  const cancelRun = async (id) => {
+    if (!window.confirm('确认取消这个监控任务吗？已打开的浏览器会被强制关闭，未完成的问题不会继续执行。')) return;
+    try {
+      const run = await api.cancelRun(id);
+      setRuns((items) => items.map((item) => item.id === id ? run : item));
+      setActiveRun(await api.getRun(id));
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
   const currentView = ['overview', 'questions', 'runs', 'sources', 'trends', 'reports', 'platforms'].includes(route.view) ? route.view : 'overview';
   const page = currentView === 'platforms' ? <PlatformsPage platforms={platforms} />
     : !brand ? <EmptyState title="先创建一个品牌" description="品牌是 GEO 监测的主体，添加品牌后再配置监控问题。" action={<button className="button primary" onClick={() => setModal('brand')}>创建品牌</button>} />

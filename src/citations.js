@@ -19,7 +19,7 @@ export function normalizeCitations(anchors, responseUrl) {
 
       const originalUrl = url.toString();
       const citationFragment = url.hash.startsWith('#:~:text=') ? originalUrl : null;
-      const isInlineCitation = citationFragment || (anchor.hasCitationMarker && !anchor.className);
+      const isInlineCitation = citationFragment || anchor.isInlineCitation || (anchor.hasCitationMarker && !anchor.className);
       if (citationFragment) url.hash = '';
       const canonicalUrl = url.toString();
       const title = anchor.text.replace(/\s+/g, ' ').trim();
@@ -56,9 +56,107 @@ export function parsePlatformReportedCount(platformId, text) {
     ? /(\d+)\s*\u4e2a\u7f51\u9875/
     : platformId === 'doubao'
       ? /\u53c2\u8003\s*(\d+)\s*\u7bc7\u8d44\u6599/
+      : platformId === 'kimi'
+        ? /\u5f15\u7528\u6765\u6e90\s*(\d+)/
       : null;
   const match = pattern?.exec(text);
   return match ? Number(match[1]) : null;
+}
+
+async function collectAnchors(locator) {
+  return locator.evaluateAll((nodes) => nodes.map((node) => ({
+    href: node.href,
+    text: (node.textContent || '').trim(),
+    className: typeof node.className === 'string' ? node.className : '',
+    hasCitationMarker: Boolean(node.querySelector('.ds-markdown-cite')),
+    isInlineCitation: node.matches?.('.pua-ref-cite-tag') ?? false,
+  })));
+}
+
+async function readKimiSourcePanel(page) {
+  const headers = page.getByText(/^\s*\u5f15\u7528\u6765\u6e90(?:\s*\d+)?\s*$/u);
+  const count = await headers.count();
+
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const header = headers.nth(index);
+    if (!await header.isVisible().catch(() => false)) continue;
+
+    return header.evaluate((node) => {
+      const externalAnchors = (container) => [...container.querySelectorAll('a[href]')]
+        .filter((anchor) => /^https?:\/\//u.test(anchor.href))
+        .map((anchor) => ({
+          href: anchor.href,
+          text: (anchor.textContent || '').trim(),
+          className: 'kimi-source-card',
+          hasCitationMarker: false,
+          isInlineCitation: false,
+        }));
+
+      let reportedCountText = node.textContent || '';
+      let titleContainer = node.parentElement;
+      for (let depth = 0; titleContainer && depth < 4; depth += 1, titleContainer = titleContainer.parentElement) {
+        const candidateText = titleContainer.textContent || '';
+        if (/\u5f15\u7528\u6765\u6e90\s*\d+/u.test(candidateText)) {
+          reportedCountText = candidateText;
+          break;
+        }
+      }
+
+      let panel = node.parentElement;
+      for (let depth = 0; panel && depth < 8; depth += 1, panel = panel.parentElement) {
+        const anchors = externalAnchors(panel);
+        if (anchors.length) {
+          return {
+            found: true,
+            reportedCountText,
+            anchors,
+          };
+        }
+      }
+
+      return { found: true, reportedCountText, anchors: [] };
+    });
+  }
+
+  return { found: false, reportedCountText: '', anchors: [] };
+}
+
+async function scrollKimiSourcePanel(page) {
+  const headers = page.getByText(/^\s*\u5f15\u7528\u6765\u6e90(?:\s*\d+)?\s*$/u);
+  const count = await headers.count();
+
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const header = headers.nth(index);
+    if (!await header.isVisible().catch(() => false)) continue;
+
+    return header.evaluate((node) => {
+      const hasExternalAnchor = (container) => Boolean(container.querySelector('a[href^="http://"], a[href^="https://"]'));
+      let panel = node.parentElement;
+      for (let depth = 0; panel && depth < 8; depth += 1, panel = panel.parentElement) {
+        if (hasExternalAnchor(panel)) break;
+      }
+      if (!panel) return false;
+
+      const scrollable = [panel, ...panel.querySelectorAll('*')].find((element) => (
+        element.scrollHeight > element.clientHeight + 1
+        && getComputedStyle(element).overflowY !== 'visible'
+      ));
+      if (!scrollable) return false;
+
+      const before = scrollable.scrollTop;
+      scrollable.scrollTop += Math.max(160, Math.floor(scrollable.clientHeight * 0.8));
+      return scrollable.scrollTop > before;
+    });
+  }
+
+  return false;
+}
+
+async function collectKimiResponseAnchors(page) {
+  const responses = page.locator('.segment.segment-assistant');
+  const count = await responses.count();
+  if (!count) return [];
+  return collectAnchors(responses.nth(count - 1).locator('a[href]'));
 }
 
 async function revealSources(page, platformId) {
@@ -253,6 +351,73 @@ async function revealSources(page, platformId) {
     };
   }
 
+  if (platformId === 'kimi') {
+    const responseRoots = page.locator('.segment.segment-assistant');
+    const responseCount = await responseRoots.count();
+    const responseRoot = responseCount ? responseRoots.nth(responseCount - 1) : null;
+    const triggers = responseRoot ? responseRoot.locator('.ref-action') : page.locator('.ref-action');
+    const triggerCount = await triggers.count();
+    let trigger = null;
+    for (let index = triggerCount - 1; index >= 0; index -= 1) {
+      const candidate = triggers.nth(index);
+      if (await candidate.isVisible().catch(() => false)) {
+        trigger = candidate;
+        break;
+      }
+    }
+    if (!trigger) return { opened: false, platformReportedCount: null, anchors: [] };
+
+    try {
+      await trigger.click({ force: true });
+    } catch {
+      return { opened: false, platformReportedCount: null, anchors: [] };
+    }
+
+    const sourcesByUrl = new Map();
+    let platformReportedCount = null;
+    let sourcePanelOpened = false;
+    let stablePasses = 0;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const panel = await readKimiSourcePanel(page);
+      if (!panel.found) {
+        await page.waitForTimeout(150);
+        continue;
+      }
+
+      sourcePanelOpened = true;
+      platformReportedCount ??= parsePlatformReportedCount('kimi', panel.reportedCountText);
+      const before = sourcesByUrl.size;
+      for (const anchor of panel.anchors) {
+        const existing = sourcesByUrl.get(anchor.href);
+        if (!existing || anchor.text.length > existing.text.length) sourcesByUrl.set(anchor.href, anchor);
+      }
+
+      if (platformReportedCount && sourcesByUrl.size >= platformReportedCount) break;
+      const scrolled = await scrollKimiSourcePanel(page);
+      stablePasses = sourcesByUrl.size === before ? stablePasses + 1 : 0;
+      if (!scrolled || stablePasses >= 3) break;
+      await page.waitForTimeout(150);
+    }
+
+    const capturedCardCount = sourcesByUrl.size;
+    try {
+      await page.keyboard.press('Escape');
+    } catch {
+      // The source panel may already be closed by the platform.
+    }
+    return {
+      opened: sourcePanelOpened,
+      platformReportedCount,
+      displayedSourceLinkCount: capturedCardCount,
+      capturedCardCount,
+      // Kimi's source sidebar exposes a total count but no stable source
+      // identifiers. Do not invent missing/index values from list position.
+      capturedCardIndexes: [],
+      missingSourceIndexes: [],
+      anchors: [...sourcesByUrl.values()],
+    };
+  }
+
   const pattern = SOURCE_TRIGGER_PATTERNS[platformId];
   if (!pattern) return { opened: false, platformReportedCount: null, anchors: [] };
 
@@ -297,12 +462,9 @@ export async function captureCitations(page, { platformId, runDirectory }) {
     // A source panel is optional. Collect links already exposed in the response.
   }
 
-  const anchors = await page.locator('a[href]').evaluateAll((nodes) => nodes.map((node) => ({
-    href: node.href,
-    text: (node.textContent || '').trim(),
-    className: typeof node.className === 'string' ? node.className : '',
-    hasCitationMarker: Boolean(node.querySelector('.ds-markdown-cite')),
-  })));
+  const anchors = platformId === 'kimi'
+    ? await collectKimiResponseAnchors(page)
+    : await collectAnchors(page.locator('a[href]'));
   const citations = normalizeCitations([...anchors, ...platformSourceAnchors], page.url());
   const citationPath = path.join(runDirectory, 'citations.json');
   const screenshotPath = path.join(runDirectory, 'citations.png');

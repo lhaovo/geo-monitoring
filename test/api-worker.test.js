@@ -328,6 +328,69 @@ test('uses headed mode only for Doubao by default', async () => {
     assert.equal(modes.doubao, 'headed');
     assert.equal(modes.qwen, 'headless');
     assert.equal(modes.yuanbao, 'headless');
+    assert.equal(modes.wenxiaoyan, 'headless');
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('reports the profile summary for every platform', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-platform-status-'));
+  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  try {
+    const created = await json(app, {
+      method: 'POST', url: '/api/profiles',
+      payload: { platformId: 'wenxiaoyan', account: '132 2060 2153' },
+    });
+    assert.equal(created.response.statusCode, 201);
+    assert.equal(created.body.profileId, '13220602153');
+    assert.equal(created.body.health, 'new');
+
+    const status = await json(app, { method: 'GET', url: '/api/platforms/status' });
+    const wenxiaoyan = status.body.find((platform) => platform.id === 'wenxiaoyan');
+    assert.equal(wenxiaoyan.profileSummary.total, 1);
+    assert.equal(wenxiaoyan.profileSummary.new, 1);
+    assert.equal(wenxiaoyan.profiles.length, 1);
+
+    const profiles = await json(app, { method: 'GET', url: '/api/profiles?platformId=wenxiaoyan' });
+    assert.equal(profiles.body.length, 1);
+
+    const disabled = await json(app, { method: 'POST', url: `/api/profiles/${created.body.id}/disable` });
+    assert.equal(disabled.response.statusCode, 200);
+    assert.equal(disabled.body.health, 'disabled');
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('stores the share link collected for a platform run', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-share-'));
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async () => ({
+      content: '回答内容',
+      citations: [],
+      artifacts: [],
+      shareStatus: 'captured',
+      shareUrl: 'https://example.test/share/abc',
+    }),
+  });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '分享测试' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '带分享的问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['deepseek'] },
+    });
+    await app.geo.worker.whenIdle();
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.status, 'completed');
+    assert.equal(detail.body.platformRuns[0].shareStatus, 'captured');
+    assert.equal(detail.body.platformRuns[0].shareUrl, 'https://example.test/share/abc');
   } finally {
     await app.close();
     await rm(dataDirectory, { recursive: true, force: true });
@@ -403,6 +466,82 @@ test('calculates brand mention rate and keeps source evidence for brand monitori
     const sources = await json(app, { method: 'GET', url: `/api/brands/${brand.body.id}/sources?days=30` });
     assert.equal(sources.body.summary.uniqueUrls, 1);
     assert.deepEqual(sources.body.sources[0].platforms, ['deepseek']);
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('refuses to run when the platform has no ready login profile', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-login-required-'));
+  let executed = false;
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async () => {
+      executed = true;
+      return { content: '回答', citations: [], artifacts: [] };
+    },
+  });
+  try {
+    await json(app, {
+      method: 'POST', url: '/api/profiles',
+      payload: { platformId: 'kimi', account: '13220602153' },
+    });
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '登录态测试' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '需要登录的问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['kimi'] },
+    });
+    await app.geo.worker.whenIdle();
+
+    assert.equal(executed, false);
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.platformRuns[0].status, 'failed');
+    assert.match(detail.body.platformRuns[0].errorMessage, /还没有可用的登录态/);
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('binds a ready login profile to the platform run', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-profile-binding-'));
+  let boundProfileId = '';
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async ({ platformRun }) => {
+      boundProfileId = platformRun.profileId;
+      return { content: '回答', citations: [], artifacts: [] };
+    },
+  });
+  try {
+    const created = await json(app, {
+      method: 'POST', url: '/api/profiles',
+      payload: { platformId: 'kimi', account: '13220602153' },
+    });
+    await json(app, { method: 'PATCH', url: `/api/profiles/${created.body.id}`, payload: { health: 'ready' } });
+
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '绑定测试' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '带登录态的问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['kimi'] },
+    });
+    await app.geo.worker.whenIdle();
+
+    assert.equal(boundProfileId, '13220602153');
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.status, 'completed');
+    assert.equal(detail.body.platformRuns[0].profileId, '13220602153');
+
+    const profiles = await json(app, { method: 'GET', url: '/api/profiles?platformId=kimi' });
+    assert.equal(profiles.body[0].health, 'ready');
+    assert.ok(profiles.body[0].lastUsedAt);
   } finally {
     await app.close();
     await rm(dataDirectory, { recursive: true, force: true });

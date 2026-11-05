@@ -1,0 +1,22 @@
+{
+  "name": "geo-monitoring-skill",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Playwright-based GEO monitoring skill.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "create-task": "node scripts/create-task.mjs",
+    "run-task": "node scripts/run-task.mjs",
+    "login": "node scripts/login.mjs",
+    "report": "node scripts/report.mjs",
+    "profile": "node scripts/profile.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.57.0"
+  }
+}

@@ -52,14 +52,15 @@ export function normalizeCitations(anchors, responseUrl) {
 }
 
 export function parsePlatformReportedCount(platformId, text) {
-  const pattern = platformId === 'deepseek'
-    ? /(\d+)\s*\u4e2a\u7f51\u9875/
-    : platformId === 'doubao'
-      ? /\u53c2\u8003\s*(\d+)\s*\u7bc7\u8d44\u6599/
-      : platformId === 'kimi'
-        ? /\u5f15\u7528\u6765\u6e90\s*(\d+)/
-      : null;
-  const match = pattern?.exec(text);
+  const patterns = {
+    deepseek: /(\d+)\s*\u4e2a\u7f51\u9875/u,
+    doubao: /\u53c2\u8003\s*(\d+)\s*\u7bc7\u8d44\u6599/u,
+    kimi: /\u5f15\u7528\u6765\u6e90\s*(\d+)/u,
+    qwen: /(\d+)\s*\u7bc7\u6765\u6e90/u,
+    yuanbao: /(?:\u53c2\u8003\u6765\u6e90|\u6765\u6e90)\s*[\uff08(]?(\d+)[\uff09)]?/u,
+    wenxiaoyan: /\u641c\u7d22\u5168\u7403\s*(\d+)\s*\u7bc7\u8d44\u6599/u,
+  };
+  const match = patterns[platformId]?.exec(String(text ?? ''));
   return match ? Number(match[1]) : null;
 }
 
@@ -71,6 +72,69 @@ async function collectAnchors(locator) {
     hasCitationMarker: Boolean(node.querySelector('.ds-markdown-cite')),
     isInlineCitation: node.matches?.('.pua-ref-cite-tag') ?? false,
   })));
+}
+
+async function collectWenxiaoyanResponseAnchors(page) {
+  const anchors = [];
+  for (const selector of [
+    '.chat-search-answer-generate:visible a[href]',
+    '.chat-right-bar:visible a[href]',
+  ]) {
+    const locator = page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+    if (count) anchors.push(...await collectAnchors(locator));
+  }
+  return anchors;
+}
+
+// 文小言把参考资料渲染成带 data-show-ext 的有序列表，每一项都内嵌了外链与
+// 标题，可以直接读出平台自报的资料总数，无需触发任何交互。
+async function readWenxiaoyanSourceList(page) {
+  const lists = page.locator('ol[class*="_reference_"], [class*="_reference-list_"]');
+  const count = await lists.count().catch(() => 0);
+  for (let listIndex = count - 1; listIndex >= 0; listIndex -= 1) {
+    const data = await lists.nth(listIndex).evaluate((list) => {
+      let reportedCount = null;
+      try {
+        const showExt = JSON.parse(list.getAttribute('data-show-ext') || '{}');
+        reportedCount = Number(showExt.total_num) || null;
+      } catch {
+        reportedCount = null;
+      }
+      const items = [...list.querySelectorAll('li[data-long-press-ext-info], li[class*="_reference-item_"]')]
+        .map((item, index) => {
+          let ext = {};
+          try { ext = JSON.parse(item.getAttribute('data-long-press-ext-info') || '{}'); } catch { ext = {}; }
+          const href = ext.link || item.querySelector('a[href]')?.href || null;
+          const text = String(ext.linkTitle || item.textContent || '').replace(/\s+/gu, ' ').trim();
+          return {
+            href,
+            text,
+            className: 'wenxiaoyan-reference-item',
+            hasCitationMarker: true,
+            isInlineCitation: true,
+            index: index + 1,
+          };
+        })
+        .filter((item) => /^https?:\/\//u.test(item.href || ''));
+      return { reportedCount, items };
+    }).catch(() => ({ reportedCount: null, items: [] }));
+    if (data.items.length) {
+      return {
+        opened: true,
+        platformReportedCount: data.reportedCount,
+        displayedSourceLinkCount: data.items.length,
+        capturedCardCount: data.items.length,
+        capturedCardIndexes: data.items.map((item) => item.index),
+        missingSourceIndexes: data.reportedCount
+          ? Array.from({ length: data.reportedCount }, (_, index) => index + 1)
+            .filter((index) => !data.items.some((item) => item.index === index))
+          : [],
+        anchors: data.items,
+      };
+    }
+  }
+  return { opened: false, platformReportedCount: null, anchors: [] };
 }
 
 async function readKimiSourcePanel(page) {
@@ -160,6 +224,7 @@ async function collectKimiResponseAnchors(page) {
 }
 
 async function revealSources(page, platformId) {
+  if (platformId === 'wenxiaoyan') return readWenxiaoyanSourceList(page);
   if (platformId === 'qwen') {
     const sourceAnchors = [];
     const trigger = page.getByText(/\d+\s*篇来源/u).last();
@@ -464,7 +529,9 @@ export async function captureCitations(page, { platformId, runDirectory }) {
 
   const anchors = platformId === 'kimi'
     ? await collectKimiResponseAnchors(page)
-    : await collectAnchors(page.locator('a[href]'));
+    : platformId === 'wenxiaoyan'
+      ? await collectWenxiaoyanResponseAnchors(page)
+      : await collectAnchors(page.locator('a[href]'));
   const citations = normalizeCitations([...anchors, ...platformSourceAnchors], page.url());
   const citationPath = path.join(runDirectory, 'citations.json');
   const screenshotPath = path.join(runDirectory, 'citations.png');

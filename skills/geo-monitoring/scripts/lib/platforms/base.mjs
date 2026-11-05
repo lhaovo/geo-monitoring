@@ -1,0 +1,1136 @@
+const INPUT_SELECTORS = [
+  'textarea:not([disabled])',
+  '[contenteditable=true][role=textbox]',
+  '[contenteditable=true]',
+  'input[type=text]:not([disabled])',
+];
+
+const SEND_BUTTON_SELECTORS = [
+  'button[aria-label*=发送]',
+  'button[aria-label*=Send]',
+  'button[title*=发送]',
+  'button[title*=Send]',
+  'a[aria-label*=发送]',
+  'a[aria-label*=Send]',
+  '[role=button][aria-label*=发送]',
+  '[role=button][aria-label*=Send]',
+  '#yuanbao-send-btn',
+  'button[class*=send]',
+  'button[class*=submit]',
+];
+
+const LOGIN_PROMPT_SELECTORS = [
+  'input[type=password]:visible',
+  'input[autocomplete=one-time-code]:visible',
+  'input[name="fm-sms-login-id"]:visible',
+  'input[name="fm-smscode"]:visible',
+  'input[placeholder*="手机号"]:visible',
+  'input[placeholder*="验证码"]:visible',
+  'form:has(input[type=password]):visible',
+  'form:has(input[type=tel]):visible',
+  '[class*=login-modal]:visible',
+  '[class*=login-dialog]:visible',
+  '[class*=login-panel]:visible',
+  '[class*=signin-modal]:visible',
+  '[class*=sign-in]:visible',
+  '[class*=passport]:visible',
+];
+
+const SMS_CODE_INPUT_SELECTORS = [
+  'input[autocomplete=one-time-code]',
+  'input[name="fm-smscode"]',
+  'input[placeholder*="验证码"]',
+  'input[inputmode=decimal]',
+];
+
+const CHALLENGE_SELECTORS = [
+  'iframe[src*=captcha]:visible',
+  '[class*=captcha]:visible',
+  '[id*=captcha]:visible',
+  '[class*=slider-verify]:visible',
+  '[class*=sliderVerify]:visible',
+  '[class*=security-verify]:visible',
+];
+
+const LOGIN_TEXT_PATTERN = /^(?:登录|立即登录|手机号登录|手机号码登录|验证码登录|短信登录|密码登录|账号密码登录|扫码登录|登录\/注册)$/u;
+const CHALLENGE_TEXT_PATTERN = /(?:请完成安全验证|拖动滑块|滑到最右|完成拼图|验证码校验)/u;
+const LOGIN_ERROR_PATTERN = /(?:账号或密码错误|账号密码错误|用户名或密码错误|密码错误|验证码错误|验证码不正确|验证码无效|无效的验证码|验证码已失效|验证码已过期|验证码格式|手机号格式不正确|请输入正确的手机号|登录失败|登录异常)/u;
+const LOGIN_INPUT_PATTERN = /(?:手机号|手机号码|验证码|密码|账号|帐号|邮箱|phone|mobile|password|passcode|verification|one[- ]?time)/iu;
+const ACCOUNT_RESTRICTION_PATTERN = /(?:\u8fdd\u53cd\u7528\u6237\u4f7f\u7528\u89c4\u8303|(?:\u8d26\u53f7|\u8d26\u6237|\u5e10\u53f7)[^\u3002\uff01\uff1f!?\n]{0,32}(?:\u7981\u8a00|\u5c01\u7981|\u9650\u5236|\u7981\u6b62\u4f7f\u7528|\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528)|(?:\u4f60|\u60a8)(?:\u5df2|\u88ab)[^\u3002\uff01\uff1f!?\n]{0,12}(?:\u7981\u6b62\u4f7f\u7528|\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528))/u;
+const RESTRICTED_UNTIL_PATTERN = /(\d{4})\s*\u5e74\s*(\d{1,2})\s*\u6708\s*(\d{1,2})\s*\u65e5\s*(\d{1,2}):(\d{2})/u;
+
+export function parseAccountRestriction(text) {
+  const message = String(text ?? '').replace(/\s+/gu, ' ').trim();
+  if (!message || !ACCOUNT_RESTRICTION_PATTERN.test(message)) return null;
+  const untilMatch = message.match(RESTRICTED_UNTIL_PATTERN);
+  const pad = (value) => String(value).padStart(2, '0');
+  const restrictionType = /\u7981\u8a00/u.test(message)
+    ? 'muted'
+    : /\u5c01\u7981/u.test(message) ? 'banned' : 'restricted';
+  return {
+    status: 'restricted',
+    reason: 'account_restricted',
+    restrictionType,
+    message,
+    restrictedUntil: untilMatch
+      ? untilMatch[1] + '-' + pad(untilMatch[2]) + '-' + pad(untilMatch[3]) + 'T' + pad(untilMatch[4]) + ':' + untilMatch[5] + ':00+08:00'
+      : null,
+    restrictedUntilText: untilMatch ? untilMatch[0].replace(/\s+/gu, '') : null,
+  };
+}
+function pageRoots(page) {
+  const mainFrame = page.mainFrame();
+  const roots = [];
+  for (const frame of page.frames()) {
+    if (frame !== mainFrame) roots.push(frame);
+  }
+  roots.push(page);
+  return roots;
+}
+
+function isVisibleCandidate(candidate, box, { minimumWidth = 0, minimumHeight = 0 } = {}) {
+  if (!box || box.width < minimumWidth || box.height < minimumHeight) return false;
+  return true;
+}
+
+export async function firstVisible(root, selectors, {
+  minimumWidth = 0,
+  minimumHeight = 0,
+  requireEnabled = false,
+} = {}) {
+  for (const selector of selectors) {
+    const candidates = root.locator(selector);
+    const count = await candidates.count().catch(() => 0);
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const box = await candidate.boundingBox().catch(() => null);
+      if (!isVisibleCandidate(candidate, box, { minimumWidth, minimumHeight })) continue;
+      if (requireEnabled && !await candidate.isEnabled().catch(() => false)) continue;
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export async function firstVisibleAcrossFrames(page, selectors, options = {}) {
+  for (const root of pageRoots(page)) {
+    const candidate = await firstVisible(root, selectors, options);
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+async function firstVisibleMatchingText(root, pattern, { maxTextLength = 300 } = {}) {
+  const candidates = root.getByText(pattern);
+  const count = await candidates.count().catch(() => 0);
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const candidate = candidates.nth(index);
+    if (!await candidate.isVisible().catch(() => false)) continue;
+    const text = (await candidate.innerText().catch(() => '')).trim();
+    if (!text || text.length > maxTextLength) continue;
+    return candidate;
+  }
+  return null;
+}
+
+async function firstVisibleMatchingTextAcrossFrames(page, pattern, options = {}) {
+  for (const root of pageRoots(page)) {
+    const candidate = await firstVisibleMatchingText(root, pattern, options);
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+async function clickFirstTextInRoot(root, labels) {
+  for (const label of labels) {
+    const candidates = root.getByText(label, { exact: true });
+    const count = await candidates.count().catch(() => 0);
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      if (!await candidate.isEnabled().catch(() => true)) continue;
+      try {
+        await candidate.click({ timeout: 3_000 });
+        return label;
+      } catch {
+        try {
+          await candidate.click({ timeout: 3_000, force: true });
+          return label;
+        } catch {
+          // Try the next visible text node.
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function clickFirstTextAcrossFrames(page, labels) {
+  for (const root of pageRoots(page)) {
+    const clicked = await clickFirstTextInRoot(root, labels);
+    if (clicked) return clicked;
+  }
+  return null;
+}
+
+async function clickFirstSelectorAcrossFrames(page, selectors) {
+  for (const root of pageRoots(page)) {
+    for (const selector of selectors) {
+      const candidates = root.locator(selector);
+      const count = await candidates.count().catch(() => 0);
+      for (let index = count - 1; index >= 0; index -= 1) {
+        const candidate = candidates.nth(index);
+        if (!await candidate.isVisible().catch(() => false)) continue;
+        if (!await candidate.isEnabled().catch(() => true)) continue;
+        try {
+          await candidate.click({ timeout: 3_000 });
+          return selector;
+        } catch {
+          try {
+            await candidate.click({ timeout: 3_000, force: true });
+            return selector;
+          } catch {
+            // Try the next matching control.
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function isLikelyChatInput(candidate) {
+  const attributes = await candidate.evaluate((element) => ({
+    type: String(element.getAttribute('type') ?? '').toLowerCase(),
+    placeholder: String(element.getAttribute('placeholder') ?? ''),
+    ariaLabel: String(element.getAttribute('aria-label') ?? ''),
+    name: String(element.getAttribute('name') ?? ''),
+  })).catch(() => null);
+  if (!attributes) return false;
+  if (['password', 'tel', 'email'].includes(attributes.type)) return false;
+  return !LOGIN_INPUT_PATTERN.test([attributes.placeholder, attributes.ariaLabel, attributes.name].join(' '));
+}
+
+async function firstVisibleChatInput(page) {
+  for (const root of pageRoots(page)) {
+    for (const selector of INPUT_SELECTORS) {
+      const candidates = root.locator(selector);
+      const count = await candidates.count().catch(() => 0);
+      for (let index = count - 1; index >= 0; index -= 1) {
+        const candidate = candidates.nth(index);
+        if (!await candidate.isVisible().catch(() => false)) continue;
+        if (!await candidate.isEnabled().catch(() => false)) continue;
+        const box = await candidate.boundingBox().catch(() => null);
+        if (!isVisibleCandidate(candidate, box, { minimumWidth: 80, minimumHeight: 20 })) continue;
+        if (!await isLikelyChatInput(candidate)) continue;
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+export async function probeLoginState(page, { loginPromptSelectors = [], loginPromptTextPattern = null } = {}) {
+  if (page.isClosed()) return { status: 'closed', reason: 'page_closed' };
+  const restrictionText = await firstVisibleMatchingTextAcrossFrames(page, ACCOUNT_RESTRICTION_PATTERN, { maxTextLength: 600 });
+  if (restrictionText) {
+    const message = (await restrictionText.innerText().catch(() => '')).trim();
+    return parseAccountRestriction(message) ?? {
+      status: 'restricted',
+      reason: 'account_restricted',
+      restrictionType: 'restricted',
+      message: message || 'Account restricted.',
+      restrictedUntil: null,
+      restrictedUntilText: null,
+    };
+  }
+  const challengeText = await firstVisibleMatchingTextAcrossFrames(page, CHALLENGE_TEXT_PATTERN);
+  if (challengeText) return { status: 'challenge', reason: 'human_challenge' };
+
+  const challengeWidget = await firstVisibleAcrossFrames(page, CHALLENGE_SELECTORS);
+  const smsCodeInput = await firstVisibleAcrossFrames(page, SMS_CODE_INPUT_SELECTORS);
+  if (challengeWidget && !smsCodeInput) return { status: 'challenge', reason: 'human_challenge' };
+
+  const loginPrompt = await firstVisibleAcrossFrames(page, [...LOGIN_PROMPT_SELECTORS, ...loginPromptSelectors])
+    ?? await firstVisibleMatchingTextAcrossFrames(page, LOGIN_TEXT_PATTERN)
+    ?? (loginPromptTextPattern ? await firstVisibleMatchingTextAcrossFrames(page, loginPromptTextPattern) : null);
+  const chatInput = await firstVisibleChatInput(page);
+  if (chatInput && !loginPrompt) return { status: 'authenticated', reason: 'chat_input_visible' };
+  if (loginPrompt) return { status: 'unauthenticated', reason: 'login_prompt_visible' };
+
+  const urls = [page.url(), ...page.frames().map((frame) => frame.url())];
+  if (urls.some((url) => /(?:login|signin|sign-in|passport|auth)/iu.test(url))) {
+    return { status: 'unauthenticated', reason: 'login_url' };
+  }
+  return { status: 'unknown', reason: 'chat_input_not_found' };
+}
+
+export async function describeLoginPage(page) {
+  const smsCodeInput = await firstVisibleAcrossFrames(page, SMS_CODE_INPUT_SELECTORS);
+  const challengeText = await firstVisibleMatchingTextAcrossFrames(page, CHALLENGE_TEXT_PATTERN);
+  const restrictionText = await firstVisibleMatchingTextAcrossFrames(page, ACCOUNT_RESTRICTION_PATTERN, { maxTextLength: 600 });
+  const widgets = [];
+  for (const selector of CHALLENGE_SELECTORS) {
+    const found = await firstVisibleAcrossFrames(page, [selector]).catch(() => null);
+    if (!found) continue;
+    widgets.push({
+      selector,
+      box: await found.boundingBox().catch(() => null),
+      html: await found.evaluate((element) => element.outerHTML.slice(0, 200)).catch(() => null),
+    });
+  }
+  return {
+    url: page.url(),
+    smsCodeInputVisible: Boolean(smsCodeInput),
+    challengeTextVisible: challengeText ? (await challengeText.innerText().catch(() => '')).trim() : null,
+    restriction: restrictionText
+      ? parseAccountRestriction((await restrictionText.innerText().catch(() => '')).trim())
+      : null,
+    challengeWidgets: widgets,
+  };
+}
+
+export async function waitForAuthenticated(page, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = { status: 'unknown', reason: 'not_checked' };
+  let consecutiveAuthenticated = 0;
+  while (Date.now() < deadline) {
+    last = await probeLoginState(page);
+    if (last.status === 'restricted') {
+      const error = new Error(last.message || 'Account restricted.');
+      error.code = 'account_restricted';
+      error.loginState = last;
+      throw error;
+    }
+    if (last.status === 'authenticated') {
+      consecutiveAuthenticated += 1;
+      if (consecutiveAuthenticated >= 2) return last;
+    } else {
+      consecutiveAuthenticated = 0;
+    }
+    await page.waitForTimeout(500);
+  }
+  const error = new Error(`Login was not verified: ${last.reason}.`);
+  error.code = last.status === 'restricted'
+    ? 'account_restricted'
+    : last.status === 'challenge' ? 'human_challenge' : 'login_required';
+  error.loginState = last;
+  throw error;
+}
+
+export async function waitForChatInput(page, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const loginState = await probeLoginState(page);
+    if (loginState.status === 'restricted') {
+      const error = new Error(loginState.message || 'Account restricted.');
+      error.code = 'account_restricted';
+      error.loginState = loginState;
+      throw error;
+    }
+    const input = await firstVisibleChatInput(page);
+    if (input) return input;
+    await page.waitForTimeout(750);
+  }
+  throw new Error('No usable chat input was found. Check login status or platform verification.');
+}
+
+export async function waitForFirstVisibleAcrossFrames(page, selectors, timeoutMs = 20_000, options = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const candidate = await firstVisibleAcrossFrames(page, selectors, options);
+    if (candidate) return candidate;
+    await page.waitForTimeout(250);
+  }
+  const error = new Error(`Login field was not found: ${selectors.join(', ')}.`);
+  error.code = 'login_field_not_found';
+  throw error;
+}
+
+async function clickLoginControl(page, selectors, labels) {
+  const selector = await clickFirstSelectorAcrossFrames(page, selectors);
+  if (selector) return { clicked: selector, method: 'selector' };
+  const label = await clickFirstTextAcrossFrames(page, labels);
+  return label ? { clicked: label, method: 'label' } : { clicked: null, method: null };
+}
+
+export async function preparePrimaryLogin(page, {
+  loginTriggerSelectors = [],
+  loginMethodSelectors = [],
+  loginTriggerLabels = ['登录', '立即登录'],
+  loginMethodLabels = [],
+  targetSelectors = [],
+  timeoutMs = 30_000,
+  loginState = {},
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let clickedTrigger = null;
+  let clickedMethod = null;
+  let consecutiveAuthenticated = 0;
+  let state = await probeLoginState(page, loginState);
+
+  while (Date.now() < deadline) {
+    const target = targetSelectors.length
+      ? await firstVisibleAcrossFrames(page, targetSelectors)
+      : null;
+    state = await probeLoginState(page, loginState);
+    if (state.status === 'authenticated') {
+      consecutiveAuthenticated += 1;
+      if (consecutiveAuthenticated >= 2) {
+        return { prepared: true, alreadyAuthenticated: true, clickedTrigger, clickedMethod, state };
+      }
+      await page.waitForTimeout(600);
+      continue;
+    }
+    consecutiveAuthenticated = 0;
+    if (state.status === 'restricted') {
+      return { prepared: false, alreadyAuthenticated: false, clickedTrigger, clickedMethod, state };
+    }
+    if (state.status === 'challenge') {
+      return { prepared: false, alreadyAuthenticated: false, clickedTrigger, clickedMethod, state };
+    }
+    if (target) {
+      return { prepared: true, alreadyAuthenticated: false, clickedTrigger, clickedMethod, state };
+    }
+
+    const directMethod = await clickLoginControl(page, loginMethodSelectors, loginMethodLabels);
+    if (directMethod.clicked) {
+      clickedMethod = directMethod.clicked;
+      await page.waitForTimeout(900);
+      continue;
+    }
+
+    const trigger = await clickLoginControl(page, loginTriggerSelectors, loginTriggerLabels);
+    if (trigger.clicked) {
+      clickedTrigger = trigger.clicked;
+      await page.waitForTimeout(900);
+      const method = await clickLoginControl(page, loginMethodSelectors, loginMethodLabels);
+      if (method.clicked) clickedMethod = method.clicked;
+      await page.waitForTimeout(900);
+      continue;
+    }
+
+    await page.waitForTimeout(500);
+  }
+
+  const target = targetSelectors.length
+    ? await firstVisibleAcrossFrames(page, targetSelectors)
+    : null;
+  state = await probeLoginState(page, loginState);
+  return {
+    prepared: Boolean(target) || state.status === 'authenticated',
+    alreadyAuthenticated: state.status === 'authenticated',
+    clickedTrigger,
+    clickedMethod,
+    state,
+  };
+}
+
+async function fillVisibleField(page, selectors, value, timeoutMs = 20_000) {
+  const field = await waitForFirstVisibleAcrossFrames(page, selectors, timeoutMs);
+  await field.click({ timeout: 3_000 }).catch(() => undefined);
+  await field.fill(String(value));
+  return field;
+}
+
+async function readAgreementChecked(candidate) {
+  return candidate.evaluate((element) => {
+    if (element.matches('input[type="checkbox"]')) return Boolean(element.checked);
+    const ariaChecked = element.getAttribute('aria-checked');
+    if (ariaChecked != null) return ariaChecked === 'true';
+    const dataState = element.getAttribute('data-state');
+    if (dataState != null) return ['checked', 'on'].includes(dataState);
+    return null;
+  }).catch(() => null);
+}
+
+async function checkAgreementIfPresent(page, selectors) {
+  if (!selectors?.length) return false;
+  for (const root of pageRoots(page)) {
+    for (const selector of selectors) {
+      const candidates = root.locator(selector);
+      const count = await candidates.count().catch(() => 0);
+      for (let index = count - 1; index >= 0; index -= 1) {
+        const candidate = candidates.nth(index);
+        const tagName = await candidate.evaluate((element) => element.tagName.toLowerCase()).catch(() => '');
+        if (tagName === 'input') {
+          const type = await candidate.getAttribute('type').catch(() => null);
+          if (type !== 'checkbox') continue;
+        }
+        if (!await candidate.isVisible().catch(() => false)) continue;
+        const checked = await readAgreementChecked(candidate);
+        if (checked === true) return true;
+        try {
+          if (tagName === 'input') {
+            await candidate.check({ force: true, timeout: 3_000 });
+          } else {
+            await candidate.click({ timeout: 3_000 });
+          }
+          if (await readAgreementChecked(candidate) === true) return true;
+        } catch {
+          // Try a forced click for custom checkbox controls that intercept events.
+          try {
+            await candidate.click({ force: true, timeout: 3_000 });
+            if (await readAgreementChecked(candidate) === true) return true;
+          } catch {
+            // Try the next agreement control.
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+async function clickRequestSmsCode(page, { requestSmsSelectors = [], requestSmsLabels = [] } = {}) {
+  let clicked = await clickFirstSelectorAcrossFrames(page, requestSmsSelectors);
+  if (clicked) return { clicked, method: 'selector' };
+  clicked = await clickFirstTextAcrossFrames(page, requestSmsLabels);
+  return clicked ? { clicked, method: 'label' } : { clicked: null, method: null };
+}
+
+async function confirmConsentIfPresent(page, {
+  consentSelectors = [],
+  consentLabels = [],
+  timeoutMs = 5_000,
+} = {}) {
+  if (!consentSelectors.length && !consentLabels.length) {
+    return { clicked: null, method: null };
+  }
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const selector = await clickFirstSelectorAcrossFrames(page, consentSelectors);
+    if (selector) return { clicked: selector, method: 'selector' };
+    const label = await clickFirstTextAcrossFrames(page, consentLabels);
+    if (label) return { clicked: label, method: 'label' };
+    if (timeoutMs <= 0) break;
+    await page.waitForTimeout(250);
+  } while (Date.now() < deadline);
+  return { clicked: null, method: null };
+}
+
+export async function submitPasswordLogin(page, {
+  account,
+  password,
+  accountInputSelectors = [],
+  passwordInputSelectors = [],
+  agreementSelectors = [],
+  submitSelectors = [],
+  submitLabels = ['登录'],
+} = {}) {
+  await fillVisibleField(page, accountInputSelectors, account);
+  await fillVisibleField(page, passwordInputSelectors, password);
+  await checkAgreementIfPresent(page, agreementSelectors);
+  const selector = await clickFirstSelectorAcrossFrames(page, submitSelectors);
+  const label = selector ? null : await clickFirstTextAcrossFrames(page, submitLabels);
+  if (!selector && !label) {
+    const error = new Error('Password login submit control was not found.');
+    error.code = 'login_submit_not_found';
+    throw error;
+  }
+  return { accountFilled: true, passwordFilled: true, submitted: true, submitSelector: selector, submitLabel: label };
+}
+
+export async function requestSmsCodeLogin(page, {
+  phone,
+  phoneInputSelectors = [],
+  codeInputSelectors = [],
+  agreementSelectors = [],
+  consentSelectors = [],
+  consentLabels = [],
+  nextStepSelectors = [],
+  nextStepLabels = [],
+  requestSmsSelectors = [],
+  requestSmsLabels = [],
+} = {}) {
+  await fillVisibleField(page, phoneInputSelectors, phone);
+  await checkAgreementIfPresent(page, agreementSelectors);
+  const preRequestConsent = await confirmConsentIfPresent(page, {
+    consentSelectors,
+    consentLabels,
+    timeoutMs: 500,
+  });
+
+  let codeInput = await firstVisibleAcrossFrames(page, codeInputSelectors);
+  let nextClicked = null;
+  if (!codeInput) {
+    nextClicked = await clickFirstSelectorAcrossFrames(page, nextStepSelectors)
+      ?? await clickFirstTextAcrossFrames(page, nextStepLabels);
+    if (nextClicked) await page.waitForTimeout(1_200);
+  }
+
+  codeInput = await firstVisibleAcrossFrames(page, codeInputSelectors);
+  const requestResult = await clickRequestSmsCode(page, { requestSmsSelectors, requestSmsLabels });
+  if (!requestResult.clicked && !nextClicked) {
+    const error = new Error('SMS request control was not found.');
+    error.code = 'sms_request_control_not_found';
+    throw error;
+  }
+
+  await page.waitForTimeout(600);
+  const consentResult = await confirmConsentIfPresent(page, {
+    consentSelectors,
+    consentLabels,
+    timeoutMs: 5_000,
+  });
+  if (consentResult.clicked) await page.waitForTimeout(1_200);
+
+  codeInput ||= await firstVisibleAcrossFrames(page, codeInputSelectors);
+  return {
+    phoneFilled: true,
+    nextClicked,
+    preRequestConsent,
+    requestClicked: requestResult.clicked,
+    requestMethod: requestResult.method,
+    consentClicked: consentResult.clicked,
+    consentMethod: consentResult.method,
+    codeRequested: Boolean(requestResult.clicked || nextClicked),
+    codeInputVisible: Boolean(codeInput),
+  };
+}
+
+export async function submitSmsCodeLogin(page, {
+  code,
+  codeInputSelectors = [],
+  submitSelectors = [],
+  submitLabels = ['登录', '下一步', '验证'],
+} = {}) {
+  const codeInput = await fillVisibleField(page, codeInputSelectors, code);
+  const selector = await clickFirstSelectorAcrossFrames(page, submitSelectors);
+  const label = selector ? null : await clickFirstTextAcrossFrames(page, submitLabels);
+  if (!selector && !label) {
+    await codeInput.press('Enter').catch(() => undefined);
+    return { codeFilled: true, submitted: true, submitMethod: 'enter_key' };
+  }
+  return { codeFilled: true, submitted: true, submitSelector: selector, submitLabel: label };
+}
+
+export async function detectLoginError(page) {
+  const candidate = await firstVisibleMatchingTextAcrossFrames(page, LOGIN_ERROR_PATTERN, { maxTextLength: 240 });
+  if (!candidate) return null;
+  return (await candidate.innerText().catch(() => '')).trim() || '登录失败';
+}
+
+export async function submitQuestion(page, question) {
+  const input = await waitForChatInput(page);
+  await input.fill(question);
+  await page.waitForTimeout(250);
+  const sendButton = await firstVisible(page, SEND_BUTTON_SELECTORS, { requireEnabled: true });
+  if (sendButton) {
+    await sendButton.click();
+    return 'send_button';
+  }
+  await input.press('Enter');
+  return 'enter_key';
+}
+
+async function readLastResponse(page, selectors) {
+  for (const selector of selectors) {
+    const candidates = page.locator(selector);
+    const count = await candidates.count();
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const text = (await candidate.innerText()).trim();
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+const SHARE_URL_PATTERN = /https?:\/\/[^\s<>"'\x60]+/giu;
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function shareLabelPattern(labels = []) {
+  const values = labels.map((label) => escapeRegExp(label)).filter(Boolean);
+  return values.length ? new RegExp(values.join('|'), 'u') : null;
+}
+
+export function extractShareUrl(value, urlPattern = /^https?:\/\//u) {
+  const text = String(value ?? '')
+    .trim()
+    .replace(/\\u([0-9a-f]{4})/giu, (_match, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\\//gu, '/');
+  if (!text) return null;
+  const matches = text.match(SHARE_URL_PATTERN) ?? [];
+  for (const raw of matches) {
+    const candidate = raw.replace(/[)\]}>\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F!?.,;:]+$/gu, '');
+    let parsed;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) continue;
+    if (urlPattern instanceof RegExp && !urlPattern.test(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+async function readClipboardText(page) {
+  return page.evaluate(async () => {
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      return '';
+    }
+  }).catch(() => '');
+}
+
+function watchShareResponses(page, urlPattern) {
+  const urls = [];
+  const seen = new Set();
+  let stopped = false;
+  const onResponse = (response) => {
+    if (stopped || !response.ok()) return;
+    const contentType = String(response.headers()['content-type'] ?? '');
+    if (!/json|text/iu.test(contentType)) return;
+    void response.text().then((text) => {
+      if (stopped) return;
+      const url = extractShareUrl(text, urlPattern);
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      urls.push(url);
+    }).catch(() => undefined);
+  };
+  page.on('response', onResponse);
+  return {
+    url() {
+      return urls.at(-1) ?? null;
+    },
+    stop() {
+      stopped = true;
+      page.off('response', onResponse);
+    },
+  };
+}
+
+async function grantShareClipboardPermission(page) {
+  const context = page.context?.();
+  if (!context?.grantPermissions) return;
+  const permissions = ['clipboard-read', 'clipboard-write'];
+  const origin = (() => {
+    try {
+      return new URL(page.url()).origin;
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    await context.grantPermissions(permissions, origin ? { origin } : undefined);
+  } catch {
+    await context.grantPermissions(permissions).catch(() => undefined);
+  }
+}
+
+async function hoverShareContext(page, selectors = []) {
+  for (const selector of selectors) {
+    const candidate = await firstVisibleAcrossFrames(page, [selector]);
+    if (!candidate) continue;
+    await candidate.hover({ timeout: 3_000 }).catch(() => undefined);
+    await page.waitForTimeout(400);
+    return selector;
+  }
+  return null;
+}
+
+async function clickShareControl(page, selectors = [], labels = [], timeoutMs = 8_000) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  const labelPattern = shareLabelPattern(labels);
+  let lastError = null;
+  do {
+    const selectorControl = await firstVisibleAcrossFrames(page, selectors);
+    if (selectorControl) {
+      try {
+        await selectorControl.click({ timeout: 3_000 });
+        return { clicked: true, method: 'selector' };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (labelPattern) {
+      const labelControl = await firstVisibleMatchingTextAcrossFrames(page, labelPattern, { maxTextLength: 120 });
+      if (labelControl) {
+        try {
+          await labelControl.click({ timeout: 3_000 });
+          return { clicked: true, method: 'label' };
+        } catch (error) {
+          lastError = error;
+        }
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(250);
+  } while (Date.now() <= deadline);
+  return { clicked: false, method: null, error: lastError?.message ?? null };
+}
+
+async function readSelectionState(control) {
+  return control.evaluate((element) => {
+    const input = element.matches('input[type="checkbox"]')
+      ? element
+      : element.querySelector('input[type="checkbox"]');
+    if (input) return { known: true, checked: Boolean(input.checked) };
+    const ariaChecked = element.getAttribute('aria-checked');
+    if (ariaChecked != null) return { known: true, checked: ariaChecked === 'true' };
+    const state = element.getAttribute('data-state');
+    if (state != null) return { known: true, checked: ['checked', 'on'].includes(state) };
+    const className = typeof element.className === 'string' ? element.className : '';
+    if (/(?:^|[-_\s])(?:checked|selected)(?:$|[-_\s])/iu.test(className)) {
+      return { known: true, checked: true };
+    }
+    if (element.querySelector('[data-icon-type*="checkboxChecked"], [class*="checkbox-checked"], [class*="checkboxChecked"]')) {
+      return { known: true, checked: true };
+    }
+    return { known: false, checked: null };
+  }).catch(() => ({ known: false, checked: null }));
+}
+
+async function ensureShareSelection(page, flow = {}) {
+  const selectors = flow.selectAllSelectors ?? [];
+  const labels = flow.selectAllLabels ?? [];
+  let control = await firstVisibleAcrossFrames(page, selectors);
+  if (!control) {
+    const pattern = shareLabelPattern(labels);
+    if (pattern) control = await firstVisibleMatchingTextAcrossFrames(page, pattern, { maxTextLength: 80 });
+  }
+  if (!control) return { found: false, clicked: false };
+  const state = await readSelectionState(control);
+  if (state.known && state.checked === true) return { found: true, clicked: false, checked: true };
+  if (state.known && state.checked === false) {
+    try {
+      await control.click({ timeout: 3_000 });
+      await page.waitForTimeout(300);
+      return { found: true, clicked: true, checked: true };
+    } catch {
+      return { found: true, clicked: false, checked: false };
+    }
+  }
+  try {
+    await control.click({ timeout: 3_000 });
+    await page.waitForTimeout(300);
+    const after = await readSelectionState(control);
+    return { found: true, clicked: true, checked: after.known ? after.checked : null };
+  } catch {
+    return { found: true, clicked: false, checked: null };
+  }
+}
+
+async function readShareUrlFromPage(page, selectors = [], urlPattern = /^https?:\/\//u) {
+  const query = selectors.length
+    ? selectors.join(', ')
+    : 'input[readonly], textarea, a[href^="http"]';
+  const values = [];
+  for (const root of pageRoots(page)) {
+    const candidates = root.locator(query);
+    const count = await candidates.count().catch(() => 0);
+    for (let index = count - 1; index >= 0 && values.length < 50; index -= 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const inputValue = await candidate.inputValue().catch(() => null);
+      const textValue = await candidate.textContent().catch(() => null);
+      const href = await candidate.getAttribute('href').catch(() => null);
+      for (const value of [inputValue, textValue, href]) {
+        const url = extractShareUrl(value, urlPattern);
+        if (url) values.push(url);
+      }
+    }
+  }
+  return values[0] ?? null;
+}
+
+async function waitForShareUrl(page, previousValue, urlPattern, timeoutMs = 8_000, responseCapture = null, linkSelectors = []) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  do {
+    const capturedUrl = responseCapture?.url?.() ?? null;
+    if (capturedUrl) return { url: capturedUrl, value: null, method: 'network' };
+    const value = await readClipboardText(page);
+    const clipboardUrl = extractShareUrl(value, urlPattern);
+    if (clipboardUrl && (value !== previousValue || !previousValue)) {
+      return { url: clipboardUrl, value, method: 'clipboard' };
+    }
+    const pageUrl = await readShareUrlFromPage(page, linkSelectors, urlPattern);
+    if (pageUrl) return { url: pageUrl, value, method: 'link_input' };
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(300);
+  } while (Date.now() <= deadline);
+  return { url: null, value: null, method: null };
+}
+
+async function closeShareDialog(page, flow = {}) {
+  const close = await clickShareControl(page, flow.closeSelectors ?? [], flow.closeLabels ?? [], 1_500);
+  if (close.clicked) return { closed: true, method: close.method };
+  await page.keyboard.press('Escape').catch(() => undefined);
+  await page.waitForTimeout(300);
+  return { closed: true, method: 'escape' };
+}
+
+function unavailableShare(reason, error = null) {
+  return {
+    status: 'unavailable',
+    url: null,
+    method: null,
+    capturedAt: new Date().toISOString(),
+    dialogOpened: false,
+    reason,
+    error,
+  };
+}
+
+function failedShare(reason, error, { dialogOpened = false, method = null } = {}) {
+  return {
+    status: 'failed',
+    url: null,
+    method,
+    capturedAt: new Date().toISOString(),
+    dialogOpened,
+    reason,
+    error: error?.message ?? String(error ?? reason),
+  };
+}
+
+async function captureShareLink(page, shareFlow = {}, { onDialogOpen = null } = {}) {
+  if (!shareFlow || shareFlow.supported === false) {
+    return unavailableShare('share_not_supported');
+  }
+  await page.bringToFront().catch(() => undefined);
+  await hoverShareContext(page, shareFlow.hoverSelectors ?? []);
+  const trigger = await clickShareControl(
+    page,
+    shareFlow.triggerSelectors ?? [],
+    shareFlow.triggerLabels ?? [],
+    shareFlow.triggerTimeoutMs ?? 12_000,
+  );
+  if (!trigger.clicked) return unavailableShare('share_trigger_not_found', trigger.error);
+
+  let dialogOpened = false;
+  const dialogSelectors = [
+    ...(shareFlow.linkSelectors ?? []),
+    ...(shareFlow.selectAllSelectors ?? []),
+    ...(shareFlow.prepareSelectors ?? []),
+    ...(shareFlow.copySelectors ?? []),
+    ...(shareFlow.closeSelectors ?? []),
+  ];
+  const dialogLabels = [
+    ...(shareFlow.selectAllLabels ?? []),
+    ...(shareFlow.prepareLabels ?? []),
+    ...(shareFlow.copyLabels ?? []),
+    ...(shareFlow.closeLabels ?? []),
+  ];
+  const dialogPattern = shareLabelPattern(dialogLabels);
+  const dialogDeadline = Date.now() + Math.max(0, Number(shareFlow.dialogTimeoutMs ?? 8_000) || 0);
+  do {
+    if (await firstVisibleAcrossFrames(page, dialogSelectors)) {
+      dialogOpened = true;
+      break;
+    }
+    if (dialogPattern && await firstVisibleMatchingTextAcrossFrames(page, dialogPattern, { maxTextLength: 120 })) {
+      dialogOpened = true;
+      break;
+    }
+    if (Date.now() >= dialogDeadline) break;
+    await page.waitForTimeout(250);
+  } while (Date.now() <= dialogDeadline);
+
+  if (!dialogOpened) {
+    return failedShare('share_dialog_not_found', 'The share dialog did not expose a known control.', { dialogOpened: false });
+  }
+
+  await grantShareClipboardPermission(page);
+  const selection = await ensureShareSelection(page, shareFlow);
+  let prepareResult = { clicked: false, method: null, error: null };
+  if ((shareFlow.prepareSelectors ?? []).length || (shareFlow.prepareLabels ?? []).length) {
+    prepareResult = await clickShareControl(
+      page,
+      shareFlow.prepareSelectors ?? [],
+      shareFlow.prepareLabels ?? [],
+      shareFlow.prepareTimeoutMs ?? 12_000,
+    );
+    if (!prepareResult.clicked) {
+      const result = failedShare(
+        'share_prepare_control_not_found',
+        prepareResult.error ?? 'No share preparation control was found.',
+        { dialogOpened: true, method: prepareResult.method },
+      );
+      result.selection = selection;
+      if (typeof onDialogOpen === 'function') await onDialogOpen().catch(() => undefined);
+      await closeShareDialog(page, shareFlow);
+      return result;
+    }
+    await page.waitForTimeout(300);
+  }
+  const urlPattern = shareFlow.urlPattern ?? /^https?:\/\//u;
+  let shareUrl = await readShareUrlFromPage(page, shareFlow.linkSelectors ?? [], urlPattern);
+  let method = shareUrl ? 'link_input' : null;
+  let copyResult = { clicked: false, method: null, error: null };
+  if (!shareUrl) {
+    const clipboardBefore = await readClipboardText(page);
+    const responseCapture = watchShareResponses(page, urlPattern);
+    try {
+      copyResult = await clickShareControl(
+        page,
+        shareFlow.copySelectors ?? [],
+        shareFlow.copyLabels ?? [],
+        shareFlow.copyTimeoutMs ?? 12_000,
+      );
+      if (!copyResult.clicked) {
+        const result = failedShare('share_copy_control_not_found', copyResult.error ?? 'No copy/generate control was found.', { dialogOpened: true, method: copyResult.method });
+        result.selection = selection;
+        if (typeof onDialogOpen === 'function') await onDialogOpen().catch(() => undefined);
+        await closeShareDialog(page, shareFlow);
+        return result;
+      }
+      const captured = await waitForShareUrl(
+        page,
+        clipboardBefore,
+        urlPattern,
+        shareFlow.clipboardTimeoutMs ?? 8_000,
+        responseCapture,
+        shareFlow.linkSelectors ?? [],
+      );
+      shareUrl = captured.url;
+      method = captured.method;
+    } finally {
+      responseCapture.stop();
+    }
+  }
+
+  if (typeof onDialogOpen === 'function') await onDialogOpen().catch(() => undefined);
+  await closeShareDialog(page, shareFlow);
+
+  if (!shareUrl) {
+    const result = failedShare('share_url_not_found', 'The share action completed but no URL was exposed.', { dialogOpened: true, method });
+    result.selection = selection;
+    result.prepareMethod = prepareResult.method;
+    result.copyMethod = copyResult.method;
+    return result;
+  }
+
+  return {
+    status: 'captured',
+    url: shareUrl,
+    method: method ?? 'unknown',
+    capturedAt: new Date().toISOString(),
+    dialogOpened: true,
+    selection,
+    prepareMethod: prepareResult.method,
+    copyMethod: copyResult.method,
+    error: null,
+  };
+}
+
+export function createChatPlatformAdapter({
+  id,
+  label,
+  entryUrl,
+  responseSelectors,
+  loginMethod = 'sms_code',
+  defaultMode = 'headless',
+  loginTriggerLabels = ['登录', '立即登录'],
+  loginMethodLabels = [],
+  minimumAnswerLength = 24,
+  answerCompleteSelectors = [],
+  minimumAnswerTimeoutMs = 0,
+  loginFlow = {},
+  loginState = {},
+  shareFlow = {},
+}) {
+  const loginTriggerSelectors = loginFlow.loginTriggerSelectors ?? [];
+  const loginMethodSelectors = loginFlow.loginMethodSelectors ?? [];
+  const targetSelectors = loginMethod === 'password'
+    ? (loginFlow.accountInputSelectors ?? [])
+    : (loginFlow.phoneInputSelectors ?? []);
+
+  function prepareLogin(page, selectors = targetSelectors) {
+    return preparePrimaryLogin(page, {
+      loginTriggerSelectors,
+      loginMethodSelectors,
+      loginTriggerLabels,
+      loginMethodLabels,
+      targetSelectors: selectors,
+      timeoutMs: 30_000,
+      loginState,
+    });
+  }
+
+  async function withFieldRecovery(page, action, recoverSelectors = targetSelectors) {
+    await page.bringToFront().catch(() => undefined);
+    try {
+      return await action();
+    } catch (error) {
+      if (!['login_field_not_found', 'login_submit_not_found', 'sms_request_control_not_found'].includes(error?.code)) throw error;
+      const preparation = await prepareLogin(page, recoverSelectors);
+      error.preparation = preparation;
+      if (!preparation.prepared) throw error;
+      return action();
+    }
+  }
+
+  return Object.freeze({
+    id,
+    label,
+    entryUrl,
+    loginMethod,
+    defaultMode,
+    loginTriggerLabels,
+    loginMethodLabels,
+    inspectLoginState(page) {
+      return probeLoginState(page, loginState);
+    },
+    detectLoginError(page) {
+      return detectLoginError(page);
+    },
+    prepareLogin(page) {
+      return prepareLogin(page);
+    },
+    submitPassword(page, credentials) {
+      return withFieldRecovery(page, () => submitPasswordLogin(page, { ...loginFlow, ...credentials }));
+    },
+    requestSmsCode(page, credentials) {
+      return withFieldRecovery(page, () => requestSmsCodeLogin(page, { ...loginFlow, ...credentials }));
+    },
+    submitSmsCode(page, credentials) {
+      return withFieldRecovery(page, () => submitSmsCodeLogin(page, { ...loginFlow, ...credentials }), loginFlow.codeInputSelectors ?? []);
+    },
+    async submitQuestion(page, question) {
+      return submitQuestion(page, question);
+    },
+    captureShareLink(page, options = {}) {
+      return captureShareLink(page, shareFlow, options);
+    },
+    async waitForAnswer(page, { timeoutMs = 300_000, stableForMs = 4_000, minimumLength = minimumAnswerLength } = {}) {
+      const effectiveTimeoutMs = Math.max(timeoutMs, minimumAnswerTimeoutMs);
+      const deadline = Date.now() + effectiveTimeoutMs;
+      let previous = '';
+      let stableSince = null;
+      let lastComplete = answerCompleteSelectors.length === 0;
+      while (Date.now() < deadline) {
+        const content = await readLastResponse(page, responseSelectors);
+        lastComplete = answerCompleteSelectors.length === 0
+          || Boolean(await firstVisibleAcrossFrames(page, answerCompleteSelectors));
+        if (content.length >= minimumLength && lastComplete) {
+          if (content === previous) {
+            stableSince ??= Date.now();
+            if (Date.now() - stableSince >= stableForMs) return content;
+          } else {
+            previous = content;
+            stableSince = null;
+          }
+        }
+        await page.waitForTimeout(1_000);
+      }
+      if (answerCompleteSelectors.length && !lastComplete) {
+        const error = new Error('Timed out before the platform marked the answer complete.');
+        error.code = 'answer_incomplete';
+        throw error;
+      }
+      if (previous) return previous;
+      throw new Error('Timed out while waiting for the platform answer.');
+    },
+  });
+}

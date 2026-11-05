@@ -74,3 +74,11 @@ test('reads the source count following the platform-specific source label', () =
   assert.equal(parsePlatformReportedCount('kimi', '引用来源 8'), 8);
   assert.equal(parsePlatformReportedCount('kimi', '参考 3 篇资料'), null);
 });
+
+test('reads the source count for the remaining platforms', () => {
+  assert.equal(parsePlatformReportedCount('qwen', '共 15 篇来源'), 15);
+  assert.equal(parsePlatformReportedCount('yuanbao', '参考来源（9）'), 9);
+  assert.equal(parsePlatformReportedCount('yuanbao', '来源 6'), 6);
+  assert.equal(parsePlatformReportedCount('wenxiaoyan', '搜索全球 23 篇资料'), 23);
+  assert.equal(parsePlatformReportedCount('wenxiaoyan', '搜索了 5 篇资料'), null);
+});

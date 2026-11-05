@@ -1,0 +1,4 @@
+interface:
+  display_name: "GEO Monitoring"
+  short_description: "通过可见浏览器管理多平台登录态，并监测 AI 搜索中的品牌可见性、回答及来源链接"
+  default_prompt: "使用 $geo-monitoring 先检查或创建登录态，通过对话收集 DeepSeek 账号密码或短信平台手机号与验证码，由本地 Playwright 自动完成登录；登录始终使用有头浏览器，豆包问答使用有头模式，其他平台监控使用无头模式，不实现扫码回退。再收集品牌和全部监控问题（不设数量上限）并运行监测。"

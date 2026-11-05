@@ -13,7 +13,7 @@ test('returns DeepSeek configuration with its chat entry URL', () => {
 test('rejects an unsupported platform with the supported ids', () => {
   assert.throws(
     () => getPlatform('unknown'),
-    /Unsupported platform "unknown"\. Supported platforms: deepseek, doubao, kimi, qwen, yuanbao/,
+    /Unsupported platform "unknown"\. Supported platforms: deepseek, doubao, kimi, qwen, wenxiaoyan, yuanbao/,
   );
 });
 

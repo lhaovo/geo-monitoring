@@ -1,7 +1,8 @@
-import { deepseekAdapter } from './deepseek/adapter.js';
+﻿import { deepseekAdapter } from './deepseek/adapter.js';
 import { doubaoAdapter } from './doubao/adapter.js';
 import { kimiAdapter } from './kimi/adapter.js';
 import { qwenAdapter } from './qwen/adapter.js';
+import { wenxiaoyanAdapter } from './wenxiaoyan/adapter.js';
 import { yuanbaoAdapter } from './yuanbao/adapter.js';
 import { ValidationError } from '../shared/errors.js';
 
@@ -10,6 +11,7 @@ const adapters = Object.freeze({
   doubao: doubaoAdapter,
   kimi: kimiAdapter,
   qwen: qwenAdapter,
+  wenxiaoyan: wenxiaoyanAdapter,
   yuanbao: yuanbaoAdapter,
 });
 

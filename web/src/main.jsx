@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api } from './api.js';
 import './styles.css';
@@ -8,7 +8,19 @@ const PLATFORM_META = {
   doubao: { label: '豆包', tone: 'orange', defaultMode: 'headed' },
   kimi: { label: 'Kimi', tone: 'cyan', defaultMode: 'headless' },
   qwen: { label: '千问', tone: 'purple', defaultMode: 'headless' },
+  wenxiaoyan: { label: '文小言', tone: 'teal', defaultMode: 'headless' },
   yuanbao: { label: '腾讯元宝', tone: 'green', defaultMode: 'headless' },
+};
+
+const SHARE_STATUS_LABELS = { captured: '已获取', unavailable: '平台未提供', failed: '采集失败' };
+
+// 左侧平台列表里的「全部平台」虚拟选项。
+const ALL_PLATFORMS = 'all';
+
+const SHARE_STATUS_HINTS = {
+  captured: '已获取平台公开分享链接，可直接对外分享。',
+  unavailable: '该平台未提供分享入口，或账号状态导致入口被隐藏。',
+  failed: '找到了分享入口，但复制分享链接失败。',
 };
 
 const STATUS_LABELS = {
@@ -40,6 +52,12 @@ function StatusPill({ status }) {
 function PlatformBadge({ id }) {
   const meta = PLATFORM_META[id] || { label: id, tone: 'slate' };
   return <span className={`platform-badge ${meta.tone}`}><i />{meta.label}</span>;
+}
+
+// 只有色块没有文字的平台标记，用于名称已经单独显示的地方。
+function PlatformDot({ id }) {
+  const meta = PLATFORM_META[id] || { tone: 'slate' };
+  return <span className={`platform-dot ${meta.tone}`} />;
 }
 
 function MetricCard({ label, value, hint, tone = 'blue' }) {
@@ -153,10 +171,170 @@ function ReportsPage({ overview }) {
   return <><PageHeader eyebrow="BRAND REPORT" title="报告中心" description="汇总品牌出现率、平台差异、问题表现和来源证据。" actions={<button className="button secondary" onClick={() => window.print()}>打印 / 导出 PDF</button>} /><section className="card report-cover"><div><div className="page-eyebrow">GEO VISIBILITY REPORT</div><h2>{brand.name} 品牌可见度报告</h2><p>统计周期：近 {summary.periodDays} 天 · 生成时间：{formatTime(new Date().toISOString())}</p></div><div className="report-score"><strong>{formatRate(summary.mentionRate)}</strong><span>品牌出现率</span></div></section><section className="metric-grid"><MetricCard label="有效样本" value={formatCount(summary.completed)} hint={`共 ${summary.totalChecks} 次检查`} /><MetricCard label="品牌提及" value={formatCount(summary.mentioned)} hint="回答中命中品牌词" tone="violet" /><MetricCard label="来源回答" value={formatCount(summary.cited)} hint={formatRate(summary.citationRate)} tone="green" /><MetricCard label="采集失败" value={formatCount(summary.failures)} hint="需人工复核" tone="orange" /></section><div className="dashboard-grid"><section className="card"><div className="card-heading"><div><h3>平台表现</h3></div></div><div className="platform-table">{platforms.map((item) => <div className="table-row" key={item.platform}><PlatformBadge id={item.platform} /><strong>{formatRate(item.mentionRate)}</strong><span>{item.completed} 样本</span><span>{formatRate(item.citationRate)} 来源率</span><span>{item.failures || '—'}</span></div>)}</div></section><section className="card"><div className="card-heading"><div><h3>重点问题</h3></div></div><div className="report-questions">{[...questions].sort((a, b) => (a.mentionRate ?? 101) - (b.mentionRate ?? 101)).slice(0, 8).map((item) => <div key={item.id}><span>{item.text}</span><strong>{formatRate(item.mentionRate)}</strong></div>)}</div></section></div></>;
 }
 
-function PlatformsPage({ platforms }) {
-  return <><PageHeader eyebrow="PLATFORM ACCESS" title="平台与登录状态" description="管理五个平台的登录状态、浏览器模式和采集风险。" /><section className="platform-cards">{platforms.map((item) => <article className="card platform-card" key={item.id}><div className="platform-card-head"><PlatformBadge id={item.id} /><span className={`risk ${item.riskLevel}`}>{item.riskLevel === 'elevated' ? '风控较高' : '常规'}</span></div><div className="login-state"><span className="state-dot unknown" />登录状态待手动验证</div><dl><div><dt>默认模式</dt><dd>{item.defaultMode === 'headed' ? '有头模式' : '无头模式'}</dd></div><div><dt>入口</dt><dd>{item.entryUrl}</dd></div></dl><div className="platform-card-actions"><button className="button secondary" onClick={() => window.open(item.entryUrl, '_blank')}>打开平台</button><button className="button ghost">验证登录</button></div></article>)}</section></>;
+const PROFILE_HEALTH = {
+  new: { label: '未登录', tone: 'unknown' },
+  ready: { label: '可用', tone: 'ready' },
+  expired: { label: '已过期', tone: 'expired' },
+  error: { label: '异常', tone: 'error' },
+  restricted: { label: '受限', tone: 'restricted' },
+  disabled: { label: '已停用', tone: 'disabled' },
+};
+
+const LOGIN_STATE_LABELS = {
+  unknown: '登录状态待手动验证',
+  ready: '已有可用登录态',
+  restricted: '登录态受限，需要处理',
+};
+
+
+function AddAccountModal({ platforms, defaultPlatformId, onClose, onSubmit }) {
+  const [platformId, setPlatformId] = useState(defaultPlatformId || platforms[0]?.id || '');
+  const [account, setAccount] = useState('');
+  const [label, setLabel] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!platformId || !account.trim()) return;
+    setBusy(true);
+    try {
+      await onSubmit({ platformId, account: account.trim(), label: label.trim() });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><div><div className="page-eyebrow">ADD ACCOUNT</div><h3>添加账号并登录</h3></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><p className="modal-intro">保存后会打开该账号专属的浏览器窗口，在窗口中完成登录并关闭窗口即可完成绑定。</p><label>平台<select className="select" value={platformId} onChange={(event) => setPlatformId(event.target.value)}><option value="">选择平台</option>{platforms.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><label>手机号或登录账号<input autoFocus value={account} onChange={(event) => setAccount(event.target.value)} placeholder="手机号或登录账号" /></label><label>备注（可选）<input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="例如：主号、备用号" /></label><div className="modal-foot"><button type="button" className="button secondary" onClick={onClose}>取消</button><button className="button primary" disabled={busy || !platformId || !account.trim()}>{busy ? '正在打开…' : '添加并登录'}</button></div></form></div>;
 }
 
+function PlatformsPage({ platforms }) {
+  const [profiles, setProfiles] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [selectedPlatformId, setSelectedPlatformId] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const reload = useCallback(async () => {
+    const [items, openSessions] = await Promise.all([api.listProfiles(), api.listLoginSessions()]);
+    setProfiles(items);
+    setSessions(openSessions);
+  }, []);
+
+  useEffect(() => { reload().catch(() => undefined); }, [reload]);
+
+  useEffect(() => {
+    if (!platforms.length) return;
+    setSelectedPlatformId((current) => {
+      if (current === ALL_PLATFORMS) return current;
+      return platforms.some((item) => item.id === current) ? current : ALL_PLATFORMS;
+    });
+  }, [platforms]);
+
+  const hasOpenSession = sessions.some((session) => session.status === 'open' || session.status === 'starting');
+  // 登录窗口还开着时轮询一次状态，操作员关闭窗口后登录态健康度会自动刷新。
+  useEffect(() => {
+    if (!hasOpenSession) return undefined;
+    const timer = setInterval(() => { reload().catch(() => undefined); }, 2000);
+    return () => clearInterval(timer);
+  }, [hasOpenSession, reload]);
+
+  const showAll = selectedPlatformId === ALL_PLATFORMS;
+  const selected = showAll ? null : (platforms.find((item) => item.id === selectedPlatformId) ?? platforms[0] ?? null);
+  const openSessions = sessions.filter((session) => session.status === 'open' || session.status === 'starting');
+  const own = showAll ? profiles : profiles.filter((profile) => profile.platformId === selected?.id);
+  const readyAll = profiles.filter((profile) => profile.health === 'ready').length;
+
+  const addAccount = async ({ platformId, account, label }) => {
+    setError('');
+    setMessage('');
+    try {
+      const result = await api.startLoginSession({ platformId, account, label });
+      setAdding(false);
+      setSelectedPlatformId(platformId);
+      setMessage(result.session.message);
+      await reload();
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+
+  const login = async (profile) => {
+    setError('');
+    setMessage('');
+    try {
+      const result = await api.startLoginSession({ platformId: profile.platformId, profileId: profile.profileId });
+      setMessage(result.session.message);
+      await reload();
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+
+  const closeSession = async (sessionId) => {
+    try {
+      const session = await api.closeLoginSession(sessionId);
+      setMessage(session.message);
+      await reload();
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+
+  const disable = async (id) => {
+    try {
+      await api.disableProfile(id);
+      await reload();
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+
+  return <>
+    <PageHeader eyebrow="PLATFORM ACCESS" title="平台与登录状态" description="左侧可选择「全部平台」查看所有平台的账号汇总，或单独切换到某个平台；新增账号后会自动打开浏览器窗口，手动登录并关闭窗口即可完成绑定。" />
+    {message ? <div className="notice info">{message}</div> : null}
+    {error ? <div className="notice">{error}</div> : null}
+    {openSessions.length ? <section className="card login-session-card"><div className="card-heading"><div><h3>正在登录</h3><p>请在已打开的浏览器窗口中完成登录，关闭窗口后登录态会自动标记为可用。</p></div></div><div className="login-session-list">{openSessions.map((session) => <div className="login-session-item" key={session.id}><span className="state-dot unknown" /><div className="login-session-main"><strong>{platformLabel(session.platformId)} · {session.account || session.profileId}</strong><span>{session.message}</span></div><button className="button secondary" onClick={() => closeSession(session.id).catch(() => undefined)}>关闭窗口</button></div>)}</div></section> : null}
+    <div className="platform-layout">
+      <aside className="card platform-side">
+        <div className="platform-side-title">平台</div>
+        <div className="platform-side-list">
+          <button className={`platform-side-item ${showAll ? 'active' : ''}`} onClick={() => setSelectedPlatformId(ALL_PLATFORMS)}><span className="platform-side-all">全部</span><span className="platform-side-name">全部平台</span><span className="platform-side-count">{profiles.length ? `${readyAll}/${profiles.length}` : '未配置'}</span></button>
+          <div className="platform-side-divider">按平台</div>
+          {platforms.map((item) => {
+          const count = profiles.filter((profile) => profile.platformId === item.id).length;
+          const ready = profiles.filter((profile) => profile.platformId === item.id && profile.health === 'ready').length;
+          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span><span className="platform-side-count">{count ? `${ready}/${count}` : '未配置'}</span></button>;
+        })}</div>
+      </aside>
+      {showAll || selected ? <section className="card platform-detail">
+        <div className="platform-detail-head">
+          <div className="platform-detail-title">{showAll ? <span className="platform-side-all">全部</span> : <PlatformDot id={selected.id} />}<h3>{showAll ? '全部平台' : selected.label}</h3>{showAll ? null : <span className={`state-dot ${selected.loginStatus ?? 'unknown'}`} />}{showAll ? null : (LOGIN_STATE_LABELS[selected.loginStatus] ?? LOGIN_STATE_LABELS.unknown)}</div>
+          <div className="platform-detail-actions">{showAll ? null : <button className="button secondary" onClick={() => window.open(selected.entryUrl, '_blank')}>打开平台</button>}<button className="button primary" onClick={() => setAdding(true)}>添加账号</button></div>
+        </div>
+        {showAll
+          ? <dl className="platform-detail-meta"><div><dt>平台数量</dt><dd>{platforms.length} 个</dd></div><div><dt>账号总数</dt><dd>{own.length} 个</dd></div><div><dt>可用账号</dt><dd>{own.filter((profile) => profile.health === 'ready').length} 个</dd></div><div><dt>受限账号</dt><dd>{own.filter((profile) => profile.health === 'restricted').length} 个</dd></div><div><dt>待登录</dt><dd>{own.filter((profile) => profile.health === 'new' || profile.health === 'expired').length} 个</dd></div><div><dt>已停用</dt><dd>{own.filter((profile) => profile.health === 'disabled').length} 个</dd></div></dl>
+          : <dl className="platform-detail-meta"><div><dt>账号总数</dt><dd>{own.length} 个</dd></div><div><dt>可用账号</dt><dd>{own.filter((profile) => profile.health === 'ready').length} 个</dd></div><div><dt>受限账号</dt><dd>{own.filter((profile) => profile.health === 'restricted').length} 个</dd></div><div><dt>入口</dt><dd>{selected.entryUrl}</dd></div></dl>}
+        <div className={`account-table ${showAll ? 'with-platform' : ''}`}>
+          <div className="account-row head">{showAll ? <span>平台</span> : null}<span>账号</span><span>状态</span><span>最近登录</span><span>最近使用</span><span>操作</span></div>
+          {own.map((profile) => {
+            const running = openSessions.some((session) => session.platformId === profile.platformId && session.profileId === profile.profileId);
+            return <div className="account-row" key={profile.id}>
+              {showAll ? <div className="account-platform"><PlatformDot id={profile.platformId} />{platformLabel(profile.platformId)}</div> : null}
+              <div className="account-name"><span className={`state-dot ${profile.health}`} /><span title={profile.account || profile.profileId}>{profile.label || profile.account || profile.profileId}</span></div>
+              <div><span className={`profile-health ${profile.health}`}>{PROFILE_HEALTH[profile.health]?.label ?? profile.health}</span></div>
+              <div className="account-time">{formatTime(profile.lastLoginAt)}</div>
+              <div className="account-time">{formatTime(profile.lastUsedAt)}</div>
+              <div className="account-actions"><button className="text-button" disabled={running} onClick={() => login(profile).catch(() => undefined)}>{running ? '登录中…' : profile.health === 'ready' ? '重新登录' : '登录'}</button>{profile.health !== 'disabled' ? <button className="text-button danger" onClick={() => disable(profile.id).catch(() => undefined)}>停用</button> : null}</div>
+            </div>;
+          })}
+          {!own.length ? <div className="account-empty">{showAll ? '还没有任何登录态，点击右上角「添加账号」开始配置。' : '该平台还没有账号，点击右上角「添加账号」开始配置登录态。'}</div> : null}
+        </div>
+      </section> : null}
+    </div>
+    {adding ? <AddAccountModal platforms={platforms} defaultPlatformId={selected?.id ?? platforms[0]?.id ?? ''} onClose={() => setAdding(false)} onSubmit={addAccount} /> : null}
+  </>;
+}
 function BrandModal({ onClose, onCreated }) {
   const [form, setForm] = useState({ name: '', aliases: '', products: '', website: '', ownedDomains: '', description: '' });
   const [busy, setBusy] = useState(false);
@@ -168,7 +346,7 @@ function BrandModal({ onClose, onCreated }) {
 function RunWizard({ brand, questions, platforms, onClose, onCreated }) {
   const enabled = questions.filter((item) => item.enabled);
   const [selectedQuestions, setSelectedQuestions] = useState(enabled.map((item) => item.id));
-  const [selectedPlatforms, setSelectedPlatforms] = useState(Object.keys(PLATFORM_META));
+  const [selectedPlatforms, setSelectedPlatforms] = useState(platforms.map((item) => item.id));
   const [modes, setModes] = useState(Object.fromEntries(platforms.map((item) => [
     item.id,
     item.defaultMode ?? PLATFORM_META[item.id]?.defaultMode ?? 'headless',
@@ -176,6 +354,18 @@ function RunWizard({ brand, questions, platforms, onClose, onCreated }) {
   const [concurrency, setConcurrency] = useState(3);
   const [appendSearchPrompt, setAppendSearchPrompt] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 平台列表是异步加载的：未手动调整过时默认全选，调整过则只剔除已消失的平台。
+  const [platformSelectionTouched, setPlatformSelectionTouched] = useState(false);
+  useEffect(() => {
+    const availableIds = platforms.map((item) => item.id);
+    setSelectedPlatforms((current) => {
+      if (!platformSelectionTouched) return availableIds;
+      const alive = new Set(availableIds);
+      return current.filter((id) => alive.has(id));
+    });
+  }, [platforms, platformSelectionTouched]);
+  const updatePlatforms = (next) => { setPlatformSelectionTouched(true); setSelectedPlatforms(next); };
+  const totalChecks = selectedQuestions.length * selectedPlatforms.length;
   const toggle = (id, values, setter) => setter(values.includes(id) ? values.filter((item) => item !== id) : [...values, id]);
   const submit = async () => {
     setBusy(true);
@@ -193,49 +383,117 @@ function RunWizard({ brand, questions, platforms, onClose, onCreated }) {
       setBusy(false);
     }
   };
+  const setMode = (platformId, mode) => setModes((current) => ({ ...current, [platformId]: mode }));
   return <div className="modal-backdrop">
-    <div className="modal wide">
-      <div className="modal-head">
-        <div><div className="page-eyebrow">NEW MONITORING RUN</div><h3>发起品牌监控</h3></div>
+    <div className="rw">
+      <div className="rw-head">
+        <div className="rw-head-main">
+          <div className="page-eyebrow">NEW MONITORING RUN</div>
+          <h3>发起品牌监控</h3>
+          <p className="rw-head-sub">选择需要监测的问题与平台，提交后按并发数排队执行。</p>
+        </div>
         <button className="icon-button" onClick={onClose}>×</button>
       </div>
-      <div className="wizard-summary">
-        <strong>{brand.name}</strong>
-        <span>{selectedQuestions.length} 个问题 × {selectedPlatforms.length} 个平台 = {selectedQuestions.length * selectedPlatforms.length} 次检查</span>
-        <div className="concurrency-control">
-          <span>全局并发数</span>
+
+      <div className="rw-stats">
+        <div className="rw-stat"><span className="rw-stat-label">监控品牌</span><strong className="rw-stat-value accent">{brand.name}</strong></div>
+        <div className="rw-stat"><span className="rw-stat-label">监控问题</span><strong className="rw-stat-value">{selectedQuestions.length}<small> / {enabled.length}</small></strong></div>
+        <div className="rw-stat"><span className="rw-stat-label">目标平台</span><strong className="rw-stat-value">{selectedPlatforms.length}<small> / {platforms.length}</small></strong></div>
+        <div className="rw-stat"><span className="rw-stat-label">预计检查次数</span><strong className="rw-stat-value">{totalChecks}</strong></div>
+        <div className="rw-stat rw-stat-control">
+          <span className="rw-stat-label">全局并发数</span>
           <select className="select compact" value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))}>
             {[1, 2, 3, 4, 5, 6].map((value) => <option value={value} key={value}>{value}</option>)}
           </select>
         </div>
       </div>
-      <div className="wizard-columns">
-        <section>
-          <div className="section-caption">1 / 选择监控问题 <small>{selectedQuestions.length} 已选</small></div>
-          <div className="wizard-list">{enabled.map((item) => <label className="wizard-check" key={item.id}><input type="checkbox" checked={selectedQuestions.includes(item.id)} onChange={() => toggle(item.id, selectedQuestions, setSelectedQuestions)} /><span>{item.text}</span></label>)}</div>
+
+      <div className="rw-columns">
+        <section className="rw-panel">
+          <div className="rw-panel-head">
+            <div className="rw-panel-title">
+              <span className="rw-step">1</span>
+              <div><strong>选择监控问题</strong><small>已选 {selectedQuestions.length} / {enabled.length} 条</small></div>
+            </div>
+            <div className="rw-panel-actions">
+              <button type="button" className="text-button" onClick={() => setSelectedQuestions(enabled.map((item) => item.id))}>全选</button>
+              <button type="button" className="text-button" onClick={() => setSelectedQuestions([])}>清空</button>
+            </div>
+          </div>
+          <div className="rw-list">
+            {enabled.map((item, index) => {
+              const on = selectedQuestions.includes(item.id);
+              return <label className={`rw-check ${on ? 'on' : ''}`} key={item.id}>
+                <input type="checkbox" checked={on} onChange={() => toggle(item.id, selectedQuestions, setSelectedQuestions)} />
+                <span className="rw-check-index">{index + 1}</span>
+                <span className="rw-check-text">{item.text}</span>
+              </label>;
+            })}
+            {!enabled.length ? <div className="rw-empty">还没有启用中的监控问题，请先到「监控问题」添加。</div> : null}
+          </div>
         </section>
-        <section>
-          <div className="section-caption">2 / 选择平台和模式 <small>{selectedPlatforms.length} 已选</small></div>
-          <div className="wizard-platforms">{platforms.map((item) => <div className={`wizard-platform ${selectedPlatforms.includes(item.id) ? 'selected' : ''}`} key={item.id}>
-            <label><input type="checkbox" checked={selectedPlatforms.includes(item.id)} onChange={() => toggle(item.id, selectedPlatforms, setSelectedPlatforms)} /><PlatformBadge id={item.id} /></label>
-            {selectedPlatforms.includes(item.id) && <select className="select" value={modes[item.id]} onChange={(event) => setModes((current) => ({ ...current, [item.id]: event.target.value }))}><option value="headless">无头</option><option value="headed">有头</option></select>}
-          </div>)}</div>
-          <label className="wizard-search-toggle">
+
+        <section className="rw-panel rw-panel-alt">
+          <div className="rw-panel-head">
+            <div className="rw-panel-title">
+              <span className="rw-step">2</span>
+              <div><strong>选择平台与模式</strong><small>已选 {selectedPlatforms.length} / {platforms.length} 个</small></div>
+            </div>
+            <div className="rw-panel-actions">
+              <button type="button" className="text-button" onClick={() => updatePlatforms(platforms.map((item) => item.id))}>全选</button>
+              <button type="button" className="text-button" onClick={() => updatePlatforms([])}>清空</button>
+            </div>
+          </div>
+          <div className="rw-list rw-list-platform">
+            {platforms.map((item) => {
+              const on = selectedPlatforms.includes(item.id);
+              const ready = item.profileSummary?.ready ?? 0;
+              const total = item.profileSummary?.total ?? 0;
+              const current = modes[item.id] ?? 'headless';
+              return <div className={`rw-platform ${on ? 'on' : ''}`} key={item.id}>
+                <label className="rw-platform-main">
+                  <input type="checkbox" checked={on} onChange={() => updatePlatforms(selectedPlatforms.includes(item.id) ? selectedPlatforms.filter((id) => id !== item.id) : [...selectedPlatforms, item.id])} />
+                  <PlatformDot id={item.id} />
+                  <span className="rw-platform-name">{item.label || platformLabel(item.id)}</span>
+                </label>
+                {on ? <>
+                  <span className={`rw-chip ${ready ? 'ok' : 'warn'}`}>{total ? `${ready}/${total} 登录态可用` : '未配置登录态'}</span>
+                  <div className="rw-segment">
+                    <button type="button" className={current === 'headless' ? 'active' : ''} onClick={() => setMode(item.id, 'headless')}>无头</button>
+                    <button type="button" className={current === 'headed' ? 'active' : ''} onClick={() => setMode(item.id, 'headed')}>有头</button>
+                  </div>
+                </> : <span className="rw-chip muted">未选择</span>}
+              </div>;
+            })}
+            {!platforms.length ? <div className="rw-empty">暂无可用平台。</div> : null}
+          </div>
+          <label className="rw-toggle">
             <input type="checkbox" checked={appendSearchPrompt} onChange={(event) => setAppendSearchPrompt(event.target.checked)} />
-            <span><strong>附加搜索提示词</strong><small>提交时要求模型先搜索相关信息，再结合可靠来源回答</small></span>
+            <span className="rw-toggle-track"><i /></span>
+            <span className="rw-toggle-text"><strong>附加搜索提示词</strong><small>要求模型先搜索相关信息，再结合可靠来源作答</small></span>
           </label>
-          <div className="wizard-note">全局最多同时执行 {concurrency} 项，同一平台始终只运行 1 个问题。豆包默认有头，其他平台默认无头。</div>
         </section>
       </div>
-      <div className="modal-foot"><button className="button secondary" onClick={onClose}>取消</button><button className="button primary" disabled={busy || !selectedQuestions.length || !selectedPlatforms.length} onClick={submit}>{busy ? '加入队列…' : '确认并开始监控'}</button></div>
+
+      <div className="rw-note">
+        <span className="rw-note-dot" />
+        全局最多同时执行 {concurrency} 项，同一平台同一时间仅运行 1 个问题。豆包默认有头模式，其他平台默认无头模式。
+      </div>
+
+      <div className="rw-foot">
+        <div className="rw-foot-hint">共 {totalChecks} 次检查，将按 {concurrency} 并发排队执行。</div>
+        <div className="rw-foot-actions">
+          <button type="button" className="button secondary" onClick={onClose}>取消</button>
+          <button type="button" className="button primary" disabled={busy || !selectedQuestions.length || !selectedPlatforms.length} onClick={submit}>{busy ? '加入队列…' : '确认并开始监控'}</button>
+        </div>
+      </div>
     </div>
   </div>;
 }
-
 function EvidenceDrawer({ platformRun, onClose }) {
   if (!platformRun) return null;
   const answer = platformRun.answer;
-  return <div className="drawer-backdrop" onClick={onClose}><aside className="drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-head"><div><PlatformBadge id={platformRun.platformId} /><h3>{platformRun.prompt?.text}</h3><p>{platformRun.mode === 'headed' ? '有头模式' : '无头模式'} · {formatTime(platformRun.createdAt)}</p></div><button className="icon-button" onClick={onClose}>×</button></div><div className="drawer-body"><div className="drawer-status"><StatusPill status={platformRun.status} />{answer && <span className={answer.brandMentioned ? 'mention-chip yes' : 'mention-chip'}>{answer.brandMentioned ? `已提及品牌 · ${answer.mentionCount} 次` : '回答未提及品牌'}</span>}</div>{platformRun.errorMessage && <div className="error-box">{platformRun.errorMessage}</div>}{answer && <><div className="evidence-section"><div className="evidence-heading"><h4>回答原文</h4>{answer.responseUrl && <a href={answer.responseUrl} target="_blank" rel="noreferrer">打开回答 ↗</a>}</div><div className="answer-content">{answer.content}</div>{answer.matchedTerms?.length ? <div className="matched-terms">命中词：{answer.matchedTerms.map((term) => <span className="tag" key={term}>{term}</span>)}</div> : null}</div><div className="evidence-section"><div className="evidence-heading"><h4>来源证据 <span>{answer.citations.length}</span></h4><span className={answer.sourcePanelOpened && (answer.platformReportedCount === null || answer.platformReportedCount === answer.citations.length) ? 'quality good' : 'quality warn'}>{answer.sourcePanelOpened ? `平台显示 ${answer.platformReportedCount ?? '—'} 篇` : '未展开来源面板'}</span></div><div className="citation-list">{answer.citations.map((citation) => <a className="citation-item" key={citation.id} href={citation.url} target="_blank" rel="noreferrer"><strong>{citation.title || citation.domain}</strong><span>{citation.domain} · {citation.citationOccurrences || 0} 次引用</span><small>{citation.url}</small></a>)}{!answer.citations.length && <p className="muted">没有抓到来源 URL。</p>}</div></div><div className="evidence-section"><div className="evidence-heading"><h4>采集证据文件</h4></div><div className="artifact-list">{answer.artifacts.map((artifact) => <a key={artifact.id} href={`/artifacts/${artifact.relativePath}`} target="_blank" rel="noreferrer">{artifact.kind === 'screenshot' ? '查看截图' : artifact.kind === 'html' ? '查看 HTML' : '查看 JSON'}</a>)}</div></div></>}</div></aside></div>;
+  return <div className="drawer-backdrop" onClick={onClose}><aside className="drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-head"><div><PlatformBadge id={platformRun.platformId} /><h3>{platformRun.prompt?.text}</h3><p>{platformRun.mode === 'headed' ? '有头模式' : '无头模式'} · {formatTime(platformRun.createdAt)}</p></div><button className="icon-button" onClick={onClose}>×</button></div><div className="drawer-body"><div className="drawer-status"><StatusPill status={platformRun.status} />{answer && <span className={answer.brandMentioned ? 'mention-chip yes' : 'mention-chip'}>{answer.brandMentioned ? `已提及品牌 · ${answer.mentionCount} 次` : '回答未提及品牌'}</span>}</div>{platformRun.errorMessage && <div className="error-box">{platformRun.errorMessage}</div>}{answer && <><div className="evidence-section"><div className="evidence-heading"><h4>回答原文</h4>{answer.responseUrl && <a href={answer.responseUrl} target="_blank" rel="noreferrer">打开回答 ↗</a>}</div><div className="answer-content">{answer.content}</div>{answer.matchedTerms?.length ? <div className="matched-terms">命中词：{answer.matchedTerms.map((term) => <span className="tag" key={term}>{term}</span>)}</div> : null}</div><div className="evidence-section"><div className="evidence-heading"><h4>来源证据 <span>{answer.citations.length}</span></h4><span className={answer.sourcePanelOpened && (answer.platformReportedCount === null || answer.platformReportedCount === answer.citations.length) ? 'quality good' : 'quality warn'}>{answer.sourcePanelOpened ? `平台显示 ${answer.platformReportedCount ?? '—'} 篇` : '未展开来源面板'}</span></div><div className="citation-list">{answer.citations.map((citation) => <a className="citation-item" key={citation.id} href={citation.url} target="_blank" rel="noreferrer"><strong>{citation.title || citation.domain}</strong><span>{citation.domain} · {citation.citationOccurrences || 0} 次引用</span><small>{citation.url}</small></a>)}{!answer.citations.length && <p className="muted">没有抓到来源 URL。</p>}</div></div><div className="evidence-section"><div className="evidence-heading"><h4>分享链接</h4><span className={platformRun.shareStatus === 'captured' ? 'quality good' : 'quality warn'}>{SHARE_STATUS_LABELS[platformRun.shareStatus] ?? '未采集'}</span></div>{platformRun.shareStatus === 'captured' && platformRun.shareUrl ? <div className="share-box"><a href={platformRun.shareUrl} target="_blank" rel="noreferrer">{platformRun.shareUrl}</a></div> : <p className="muted">{SHARE_STATUS_HINTS[platformRun.shareStatus] ?? '本次没有采集分享链接。'}</p>}</div><div className="evidence-section"><div className="evidence-heading"><h4>采集证据文件</h4></div><div className="artifact-list">{answer.artifacts.map((artifact) => <a key={artifact.id} href={`/artifacts/${artifact.relativePath}`} target="_blank" rel="noreferrer">{artifact.kind === 'screenshot' ? '查看截图' : artifact.kind === 'html' ? '查看 HTML' : '查看 JSON'}</a>)}</div></div></>}</div></aside></div>;
 }
 
 function App() {

@@ -1,0 +1,6 @@
+node_modules/
+output/
+profiles/
+test-output/
+test-profiles/
+.account-fingerprint.key

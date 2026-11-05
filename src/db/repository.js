@@ -1,5 +1,7 @@
 import { createId, now } from '../shared/ids.js';
 import { NotFoundError, ValidationError } from '../shared/errors.js';
+import { normalizeAccountIdentity, normalizeProfileId, profileIdFromAccount } from '../profiles/account-identity.js';
+import { analyzeBrandMentions, analyzeOwnedDomainCitations } from '../analysis/brand-analysis.js';
 
 const toBoolean = (value) => Boolean(value);
 
@@ -17,34 +19,19 @@ function listValue(value) {
   return [];
 }
 
-function countOccurrences(text, term) {
-  if (!text || !term) return 0;
-  const source = text.toLocaleLowerCase();
-  const needle = term.toLocaleLowerCase();
-  let count = 0;
-  let offset = 0;
-  while (true) {
-    const index = source.indexOf(needle, offset);
-    if (index < 0) return count;
-    count += 1;
-    offset = index + Math.max(needle.length, 1);
-  }
-}
-
+// 品牌提及分析统一走共享模块，保证与 skill 版本口径一致。
 function analyzeBrand(brand, content) {
-  const terms = [...new Set([
-    brand?.name,
-    ...parseJson(brand?.aliases_json, []),
-    ...parseJson(brand?.products_json, []),
-  ].map((item) => String(item ?? '').trim()).filter(Boolean))];
-  const matchedTerms = terms.filter((term) => countOccurrences(content, term) > 0);
-  const mentionCount = matchedTerms.reduce((total, term) => total + countOccurrences(content, term), 0);
+  const analysis = analyzeBrandMentions(content, {
+    name: brand?.name,
+    aliases: parseJson(brand?.aliases_json, []),
+    products: parseJson(brand?.products_json, []),
+  });
   return {
-    brandMentioned: mentionCount > 0,
-    mentionCount,
-    matchedTerms,
+    brandMentioned: analysis.mentioned,
+    mentionCount: analysis.occurrences,
+    matchedTerms: analysis.matches.map((match) => match.term),
     recommendation: 'unknown',
-    analysisConfidence: matchedTerms.length ? 1 : 0,
+    analysisConfidence: analysis.matches.length ? 1 : 0,
   };
 }
 
@@ -103,6 +90,24 @@ function mapRun(row) {
   };
 }
 
+function mapProfile(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    platformId: row.platform_id,
+    profileId: row.profile_id,
+    account: row.account ?? '',
+    label: row.label ?? '',
+    health: row.health,
+    restrictedUntil: row.restricted_until ?? null,
+    lastLoginAt: row.last_login_at ?? null,
+    lastUsedAt: row.last_used_at ?? null,
+    lastError: row.last_error ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function mapPlatformRun(row) {
   if (!row) return null;
   return {
@@ -112,6 +117,11 @@ function mapPlatformRun(row) {
     platformId: row.platform_id,
     mode: row.mode,
     status: row.status,
+    profileId: row.profile_id ?? '',
+    shareStatus: row.share_status ?? 'unavailable',
+    shareUrl: row.share_url ?? null,
+    restrictedUntil: row.restricted_until ?? null,
+    attempts: Number(row.attempts ?? 0),
     errorMessage: row.error_message,
     startedAt: row.started_at,
     completedAt: row.completed_at,
@@ -387,7 +397,7 @@ export class GeoRepository {
       JOIN platform_runs pr ON pr.run_id = r.id WHERE pr.id = ?`).get(platformRunId);
     const analysis = analyzeBrand(brand, result.content ?? '');
     const write = this.database.transaction(() => {
-      this.database.prepare(`UPDATE platform_runs SET status = 'completed', completed_at = ?, error_message = NULL WHERE id = ?`).run(timestamp, platformRunId);
+      this.database.prepare(`UPDATE platform_runs SET status = 'completed', completed_at = ?, error_message = NULL, lease_id = NULL, lease_expires_at = NULL, share_status = ?, share_url = ? WHERE id = ?`).run(timestamp, result.shareStatus ?? 'unavailable', result.shareUrl ?? null, platformRunId);
       const answerId = createId();
       this.database.prepare(`INSERT INTO answers
         (id, platform_run_id, content, response_url, source_panel_opened, platform_reported_count, displayed_source_link_count, captured_card_count, missing_source_indexes_json, brand_mentioned, mention_count, matched_terms_json, recommendation, analysis_confidence, created_at)
@@ -470,9 +480,21 @@ export class GeoRepository {
       if (row.created_at > item.lastSeenAt) item.lastSeenAt = row.created_at;
     }
     const sources = [...byUrl.values()];
-    return { summary: { uniqueUrls: sources.length, domains: new Set(sources.map((item) => item.domain)).size,
-      citationCount: sources.reduce((total, item) => total + item.citationCount, 0),
-      citationOccurrences: sources.reduce((total, item) => total + item.citationOccurrences, 0), periodDays: safeDays }, sources };
+    // 自有域名引用：衡量 AI 回答是否引用了品牌自己的站点。
+    const owned = analyzeOwnedDomainCitations(sources, { ownedDomains: this.getBrand(brandId).ownedDomains });
+    return {
+      summary: {
+        uniqueUrls: sources.length,
+        domains: new Set(sources.map((item) => item.domain)).size,
+        citationCount: sources.reduce((total, item) => total + item.citationCount, 0),
+        citationOccurrences: sources.reduce((total, item) => total + item.citationOccurrences, 0),
+        ownedDomainCitations: owned.count,
+        ownedDomainCited: owned.cited,
+        periodDays: safeDays,
+      },
+      ownedDomains: { cited: owned.cited, count: owned.count, citations: owned.citations },
+      sources,
+    };
   }
 
   getPendingPlatformRunsForRun(runId) { return this.getPendingPlatformRuns(runId); }
@@ -526,5 +548,192 @@ export class GeoRepository {
     return this.database.prepare('SELECT * FROM task_events WHERE run_id = ? ORDER BY created_at ASC').all(runId).map((row) => ({
       id: row.id, runId: row.run_id, platformRunId: row.platform_run_id, level: row.level, message: row.message, createdAt: row.created_at,
     }));
+  }
+
+  // ---- 登录态 Profile ----
+  // Profile 是「平台 + 账号」的登录态载体，账号决定 Profile 标识，浏览器数据
+  // 目录按平台与 Profile 隔离，互不共享 Cookie。
+
+  listProfiles({ platformId } = {}) {
+    const where = platformId ? 'WHERE platform_id = ?' : '';
+    const params = platformId ? [platformId] : [];
+    return this.database.prepare(`SELECT * FROM profiles ${where} ORDER BY platform_id ASC, created_at ASC`).all(...params).map(mapProfile);
+  }
+
+  getProfile(profileId) {
+    const profile = mapProfile(this.database.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId));
+    if (!profile) throw new NotFoundError('未找到该登录态 Profile。');
+    return profile;
+  }
+
+  getProfileByBinding(platformId, profileKey) {
+    if (!profileKey) return null;
+    const row = this.database.prepare('SELECT * FROM profiles WHERE platform_id = ? AND profile_id = ?').get(platformId, profileKey);
+    return row ? mapProfile(row) : null;
+  }
+
+  findProfileByAccount(platformId, account) {
+    if (!account) return null;
+    const rows = this.database.prepare('SELECT * FROM profiles WHERE platform_id = ?').all(platformId);
+    return rows.map(mapProfile).find((profile) => profile.account && profile.account === account) ?? null;
+  }
+
+  createProfile({ platformId, profileKey, account, label = '' }) {
+    if (!platformId) throw new ValidationError('platformId 不能为空。');
+    const normalizedAccount = normalizeAccountIdentity(account);
+    const key = normalizeProfileId(profileKey ?? (normalizedAccount ? profileIdFromAccount(normalizedAccount) : ''));
+    if (this.getProfileByBinding(platformId, key)) {
+      throw new ValidationError(`${platformId}:${key} 登录态已存在。`);
+    }
+    const timestamp = now();
+    const id = createId();
+    this.database.prepare(`INSERT INTO profiles
+      (id, platform_id, profile_id, account, label, health, created_at, updated_at)
+      VALUES (@id, @platformId, @profileId, @account, @label, 'new', @timestamp, @timestamp)`).run({
+      id, platformId, profileId: key, account: normalizedAccount, label: String(label ?? '').trim(),
+      timestamp,
+    });
+    return this.getProfile(id);
+  }
+
+  updateProfile(profileId, values = {}) {
+    const current = this.getProfile(profileId);
+    const health = values.health === undefined ? current.health : String(values.health);
+    if (!['new', 'ready', 'expired', 'error', 'restricted', 'disabled'].includes(health)) {
+      throw new ValidationError(`未知的登录态状态：${health}。`);
+    }
+    this.database.prepare(`UPDATE profiles SET account = ?, label = ?, health = ?,
+      restricted_until = ?, last_login_at = ?, last_used_at = ?, last_error = ?, updated_at = ? WHERE id = ?`).run(
+      values.account === undefined ? current.account : normalizeAccountIdentity(values.account),
+      values.label === undefined ? current.label : String(values.label ?? '').trim(),
+      health,
+      values.restrictedUntil === undefined ? current.restrictedUntil : (values.restrictedUntil || null),
+      values.lastLoginAt === undefined ? current.lastLoginAt : (values.lastLoginAt || null),
+      values.lastUsedAt === undefined ? current.lastUsedAt : (values.lastUsedAt || null),
+      values.lastError === undefined ? current.lastError : (values.lastError || null),
+      now(), profileId,
+    );
+    return this.getProfile(profileId);
+  }
+
+  updateProfileByBinding(platformId, profileKey, values = {}) {
+    const profile = this.getProfileByBinding(platformId, profileKey);
+    if (!profile) return null;
+    return this.updateProfile(profile.id, values);
+  }
+
+  markProfileUsed(profileId, { health = 'ready', restrictedUntil = null, error = null } = {}) {
+    const timestamp = now();
+    this.database.prepare(`UPDATE profiles SET health = ?, restricted_until = ?, last_used_at = ?, last_error = ?, updated_at = ?
+      WHERE id = ?`).run(health, restrictedUntil, timestamp, error, timestamp, profileId);
+    return this.getProfile(profileId);
+  }
+
+  // 按「平台 + Profile 标识」更新使用状态，任务侧只持有 Profile 标识。
+  markProfileUsedByBinding(platformId, profileKey, { health = 'ready' } = {}) {
+    const profile = this.getProfileByBinding(platformId, profileKey);
+    if (!profile) return null;
+    return this.markProfileUsed(profile.id, { health });
+  }
+
+  disableProfile(profileId, reason = '') {
+    return this.updateProfile(profileId, { health: 'disabled', lastError: reason || null });
+  }
+
+  // 挑选一个可用的登录态：只有已经完成登录并复验通过的 ready Profile 会被自动选中。
+  // 未登录、已过期、异常、受限与已停用的 Profile 都不会被自动使用，
+  // 需要人工重新登录并把状态改回 ready。
+  pickAvailableProfile(platformId, { exclude = [] } = {}) {
+    const excluded = new Set(exclude);
+    return this.listProfiles({ platformId })
+      .filter((profile) => !excluded.has(profile.profileId))
+      .filter((profile) => profile.health === 'ready')
+      .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)))[0] ?? null;
+  }
+
+  // ---- 动态共享队列（租约 / 心跳） ----
+
+  claimNextPlatformRun(runId, platformId, { leaseId, leaseExpiresAt }) {
+    const claim = this.database.transaction(() => {
+      const row = this.database.prepare(`SELECT pr.*, p.text AS prompt_text, p.category AS prompt_category
+        FROM platform_runs pr JOIN prompts p ON p.id = pr.prompt_id
+        WHERE pr.run_id = ? AND pr.platform_id = ? AND pr.status = 'queued' ORDER BY pr.created_at ASC LIMIT 1`).get(runId, platformId);
+      if (!row) return null;
+      const updated = this.database.prepare(`UPDATE platform_runs
+        SET status = 'running', lease_id = ?, lease_expires_at = ?, attempts = attempts + 1,
+            started_at = COALESCE(started_at, ?), error_message = NULL
+        WHERE id = ? AND status = 'queued'`).run(leaseId, leaseExpiresAt, now(), row.id);
+      if (!updated.changes) return null;
+      return this.database.prepare(`SELECT pr.*, p.text AS prompt_text, p.category AS prompt_category
+        FROM platform_runs pr JOIN prompts p ON p.id = pr.prompt_id WHERE pr.id = ?`).get(row.id);
+    })();
+    return claim ? mapPlatformRun(claim) : null;
+  }
+
+  heartbeatPlatformRun(platformRunId, { leaseId, leaseExpiresAt }) {
+    const result = this.database.prepare(`UPDATE platform_runs SET lease_expires_at = ?
+      WHERE id = ? AND lease_id = ? AND status = 'running'`).run(leaseExpiresAt, platformRunId, leaseId);
+    return result.changes > 0;
+  }
+
+  completePlatformRunClaim(platformRunId, leaseId) {
+    const result = this.database.prepare(`UPDATE platform_runs
+      SET status = 'completed', lease_id = NULL, lease_expires_at = NULL, completed_at = ?
+      WHERE id = ? AND lease_id = ?`).run(now(), platformRunId, leaseId);
+    return result.changes > 0;
+  }
+
+  // 失败后回到队列等待重试；超过最大尝试次数则标记为最终失败。
+  failPlatformRunClaim(platformRunId, leaseId, errorMessage, { maxAttempts = 3 } = {}) {
+    const row = this.database.prepare('SELECT attempts FROM platform_runs WHERE id = ?').get(platformRunId);
+    const attempts = Number(row?.attempts ?? 0);
+    if (attempts >= maxAttempts) {
+      this.database.prepare(`UPDATE platform_runs SET status = 'failed', error_message = ?, lease_id = NULL,
+        lease_expires_at = NULL, completed_at = ? WHERE id = ?`).run(errorMessage, now(), platformRunId);
+      return { requeued: false, status: 'failed', attempts };
+    }
+    this.database.prepare(`UPDATE platform_runs SET status = 'queued', error_message = ?, lease_id = NULL,
+      lease_expires_at = NULL WHERE id = ?`).run(errorMessage, platformRunId);
+    return { requeued: true, status: 'queued', attempts };
+  }
+
+  // 租约过期的任务重新入队，用于恢复崩溃 Worker 遗留的工作。
+  expirePlatformRunClaims(timestamp = now()) {
+    const result = this.database.prepare(`UPDATE platform_runs SET status = 'queued', lease_id = NULL,
+      lease_expires_at = NULL, error_message = '上一次执行中断，已重新排队。'
+      WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`).run(timestamp);
+    return result.changes;
+  }
+
+  requeuePlatformRunsForProfile(platformId, profileId, reason) {
+    const result = this.database.prepare(`UPDATE platform_runs SET status = 'queued', profile_id = '',
+      lease_id = NULL, lease_expires_at = NULL, error_message = ?
+      WHERE platform_id = ? AND profile_id = ? AND status IN ('queued', 'running')`).run(reason, platformId, profileId);
+    return result.changes;
+  }
+
+  assignPlatformRunProfile(platformRunId, profileId) {
+    this.database.prepare('UPDATE platform_runs SET profile_id = ? WHERE id = ?').run(profileId, platformRunId);
+  }
+
+  setPlatformRunShare(platformRunId, { status, url = null }) {
+    this.database.prepare('UPDATE platform_runs SET share_status = ?, share_url = ? WHERE id = ?')
+      .run(status, url, platformRunId);
+  }
+
+  setPlatformRunRestricted(platformRunId, restrictedUntil) {
+    this.database.prepare('UPDATE platform_runs SET restricted_until = ? WHERE id = ?').run(restrictedUntil, platformRunId);
+  }
+
+  summarizeRunQueue(runId) {
+    const rows = this.database.prepare(`SELECT platform_id, status, COUNT(*) AS total
+      FROM platform_runs WHERE run_id = ? GROUP BY platform_id, status`).all(runId);
+    const platforms = new Map();
+    for (const row of rows) {
+      const entry = platforms.get(row.platform_id) ?? { platformId: row.platform_id, queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+      entry[row.status] = row.total;
+      platforms.set(row.platform_id, entry);
+    }
+    return [...platforms.values()];
   }
 }

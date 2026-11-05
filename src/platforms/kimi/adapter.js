@@ -76,6 +76,20 @@ const baseKimiAdapter = createChatPlatformAdapter({
   id: 'kimi',
   label: 'Kimi',
   entryUrl: 'https://www.kimi.com/',
+  defaultMode: 'headless',
+  shareFlow: {
+    hoverSelectors: ['.segment-assistant-actions', '.segment-assistant'],
+    triggerSelectors: ['button[aria-label*="分享"]', '[role=button][aria-label*="分享"]'],
+    triggerLabels: ['分享'],
+    selectAllSelectors: ['.select-all', 'label:has-text("全选")'],
+    selectAllLabels: ['全选'],
+    copySelectors: ['.simple-button:has-text("复制链接")', 'button:has-text("复制链接")'],
+    copyLabels: ['复制链接', '生成链接'],
+    linkSelectors: ['a[href*="/share/"]', 'input[readonly]', 'textarea[readonly]'],
+    closeSelectors: ['.simple-button:has-text("取消")', 'button:has-text("取消")'],
+    closeLabels: ['取消'],
+    urlPattern: /https?:\/\/(?:www\.)?kimi\.com\/share\//u,
+  },
   responseSelectors: ['[class*="markdown"]', '[data-message-id]', '[class*="message-content"]'],
 });
 

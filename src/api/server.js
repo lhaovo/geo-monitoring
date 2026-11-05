@@ -8,6 +8,7 @@ import { createPaths } from '../config/paths.js';
 import { getPlatformAdapter, listPlatformAdapters } from '../platforms/index.js';
 import { ValidationError } from '../shared/errors.js';
 import { RunWorker } from '../worker/run-worker.js';
+import { LoginManager } from '../login/login-manager.js';
 
 function requireString(value, fieldName) {
   if (typeof value !== 'string' || !value.trim()) throw new ValidationError(`${fieldName}不能为空。`);
@@ -25,6 +26,7 @@ export function buildServer({
   repository,
   worker,
   executePlatformRun,
+  loginManager: providedLoginManager,
   logger = false,
 } = {}) {
   const paths = createPaths({ dataDirectory });
@@ -32,8 +34,23 @@ export function buildServer({
   const repo = repository ?? new GeoRepository(ownedDatabase);
   const runWorker = worker ?? new RunWorker({ repository: repo, paths, execute: executePlatformRun });
   const app = Fastify({ logger });
+  const loginManager = providedLoginManager ?? new LoginManager({ repository: repo, paths });
 
-  app.decorate('geo', { paths, database: ownedDatabase, repository: repo, worker: runWorker });
+  app.decorate('geo', { paths, database: ownedDatabase, repository: repo, worker: runWorker, loginManager });
+
+  // 允许「没有请求体」的 POST：例如关闭登录窗口、停用登录态这类操作。
+  // Fastify 默认会对带 content-type: application/json 的空体直接报错，这里统一按空对象处理。
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
+    const raw = typeof body === 'string' ? body.trim() : '';
+    if (!raw) return done(null, {});
+    try {
+      done(null, JSON.parse(raw));
+    } catch {
+      const error = new Error('请求体必须是合法的 JSON。');
+      error.statusCode = 400;
+      done(error);
+    }
+  });
 
   app.setErrorHandler((error, request, reply) => {
     const statusCode = error.statusCode ?? (error instanceof ValidationError ? 400 : 500);
@@ -45,14 +62,67 @@ export function buildServer({
   app.get('/api/platforms', async () => listPlatformAdapters().map((platform) => ({
     id: platform.id, label: platform.label, entryUrl: platform.entryUrl,
   })));
-  app.get('/api/platforms/status', async () => listPlatformAdapters().map((platform) => ({
-    id: platform.id,
-    label: platform.label,
-    entryUrl: platform.entryUrl,
-    defaultMode: platform.id === 'doubao' ? 'headed' : 'headless',
-    loginStatus: 'unknown',
-    riskLevel: platform.id === 'doubao' ? 'elevated' : 'normal',
-  })));
+  // 平台状态会带上该平台下所有登录态 Profile 的健康状况，
+  // 前端据此提示哪些账号已被平台限制或需要重新登录。
+  app.get('/api/platforms/status', async () => listPlatformAdapters().map((platform) => {
+    const profiles = repo.listProfiles({ platformId: platform.id });
+    const healthy = profiles.filter((profile) => profile.health === 'ready').length;
+    const restricted = profiles.filter((profile) => profile.health === 'restricted').length;
+    return {
+      id: platform.id,
+      label: platform.label,
+      entryUrl: platform.entryUrl,
+      defaultMode: platform.defaultMode ?? (platform.id === 'doubao' ? 'headed' : 'headless'),
+      loginStatus: profiles.length === 0 ? 'unknown' : healthy > 0 ? 'ready' : restricted > 0 ? 'restricted' : 'unknown',
+      riskLevel: platform.id === 'doubao' ? 'elevated' : 'normal',
+      profiles,
+      profileSummary: {
+        total: profiles.length,
+        ready: healthy,
+        restricted,
+        new: profiles.filter((profile) => profile.health === 'new').length,
+        expired: profiles.filter((profile) => profile.health === 'expired').length,
+        error: profiles.filter((profile) => profile.health === 'error').length,
+        disabled: profiles.filter((profile) => profile.health === 'disabled').length,
+      },
+    };
+  }));
+
+  // ---- 登录态 Profile ----
+  app.get('/api/profiles', async (request) => repo.listProfiles({ platformId: request.query.platformId }));
+  app.post('/api/profiles', async (request, reply) => {
+    const body = requireBody(request.body);
+    getPlatformAdapter(requireString(body.platformId, 'platformId'));
+    const profile = repo.createProfile({
+      platformId: body.platformId,
+      profileKey: body.profileId,
+      account: body.account,
+      label: body.label ?? '',
+    });
+    return reply.status(201).send(profile);
+  });
+  app.get('/api/profiles/:profileId', async (request) => repo.getProfile(request.params.profileId));
+  app.patch('/api/profiles/:profileId', async (request) => repo.updateProfile(request.params.profileId, requireBody(request.body)));
+  app.post('/api/profiles/:profileId/disable', async (request) => repo.disableProfile(request.params.profileId, request.body?.reason ?? ''));
+
+  // ---- 登录窗口会话 ----
+  // 前端「平台与登录状态」页面通过这里拉起可见浏览器，操作员手动完成登录，
+  // 关闭浏览器后登录态会自动更新为可用。
+  app.post('/api/login-sessions', async (request, reply) => {
+    const body = requireBody(request.body);
+    const platformId = requireString(body.platformId, 'platformId');
+    getPlatformAdapter(platformId);
+    const result = await loginManager.startSession({
+      platformId,
+      account: body.account ?? '',
+      profileId: body.profileId ?? '',
+      label: body.label ?? '',
+    });
+    return reply.status(result.reused ? 200 : 201).send(result);
+  });
+  app.get('/api/login-sessions', async () => loginManager.listSessions());
+  app.get('/api/login-sessions/:sessionId', async (request) => loginManager.getSession(request.params.sessionId));
+  app.post('/api/login-sessions/:sessionId/close', async (request) => loginManager.closeSession(request.params.sessionId));
 
   // Brand-first API. The project routes below remain as compatibility aliases
   // for the existing CLI/tests while the UI speaks in brand terminology.
@@ -178,6 +248,7 @@ export function buildServer({
   }
 
   app.addHook('onClose', async () => {
+    await Promise.all(loginManager.listSessions().map((session) => loginManager.closeSession(session.id).catch(() => undefined)));
     if (!database && !repository) ownedDatabase.close();
   });
   return app;

@@ -23,8 +23,8 @@ export function describeAuthentication(url) {
   }
 }
 
-export async function launchPlatform(platform, { dataDirectory = path.resolve('data') } = {}) {
-  const artifacts = await createRunArtifacts(dataDirectory, platform.id);
+export async function launchPlatform(platform, { dataDirectory = path.resolve('data'), profileId = '' } = {}) {
+  const artifacts = await createRunArtifacts(dataDirectory, platform.id, new Date(), profileId);
   const record = {
     platform: platform.id,
     platformLabel: platform.label,

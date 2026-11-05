@@ -107,6 +107,24 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_artifacts_platform_run_id ON artifacts(platform_run_id);
 
+  CREATE TABLE IF NOT EXISTS profiles (
+    id TEXT PRIMARY KEY,
+    platform_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    account TEXT NOT NULL DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',
+    login_method TEXT NOT NULL DEFAULT 'sms_code',
+    health TEXT NOT NULL DEFAULT 'new',
+    restricted_until TEXT,
+    last_login_at TEXT,
+    last_used_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform_id, profile_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_profiles_platform_id ON profiles(platform_id);
+
   CREATE TABLE IF NOT EXISTS task_events (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -149,5 +167,12 @@ export function openDatabase(databasePath) {
   ensureColumn(database, 'answers', 'matched_terms_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(database, 'answers', 'recommendation', "TEXT NOT NULL DEFAULT 'unknown'");
   ensureColumn(database, 'answers', 'analysis_confidence', "REAL NOT NULL DEFAULT 0");
+  ensureColumn(database, 'platform_runs', 'profile_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, 'platform_runs', 'share_status', "TEXT NOT NULL DEFAULT 'unavailable'");
+  ensureColumn(database, 'platform_runs', 'share_url', 'TEXT');
+  ensureColumn(database, 'platform_runs', 'restricted_until', 'TEXT');
+  ensureColumn(database, 'platform_runs', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(database, 'platform_runs', 'lease_id', 'TEXT');
+  ensureColumn(database, 'platform_runs', 'lease_expires_at', 'TEXT');
   return database;
 }

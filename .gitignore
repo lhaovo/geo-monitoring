@@ -3,3 +3,7 @@ data/
 playwright-report/
 test-results/
 web/dist/
+skills/geo-monitoring/profiles/
+skills/geo-monitoring/output/
+.xlsx-builder/
+outputs/

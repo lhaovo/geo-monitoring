@@ -81,6 +81,11 @@ const SCHEMA = `
     matched_terms_json TEXT NOT NULL DEFAULT '[]',
     recommendation TEXT NOT NULL DEFAULT 'unknown',
     analysis_confidence REAL NOT NULL DEFAULT 0,
+    source_mentioned INTEGER NOT NULL DEFAULT 0,
+    source_mention_count INTEGER NOT NULL DEFAULT 0,
+    source_matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    mention_backed_by_source INTEGER NOT NULL DEFAULT 0,
+    mention_without_source INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   );
 
@@ -93,6 +98,8 @@ const SCHEMA = `
     domain TEXT NOT NULL,
     citation_fragments_json TEXT NOT NULL DEFAULT '[]',
     citation_occurrences INTEGER NOT NULL DEFAULT 0,
+    brand_mentioned INTEGER NOT NULL DEFAULT 0,
+    matched_terms_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     UNIQUE(answer_id, url)
   );
@@ -167,6 +174,13 @@ export function openDatabase(databasePath) {
   ensureColumn(database, 'answers', 'matched_terms_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(database, 'answers', 'recommendation', "TEXT NOT NULL DEFAULT 'unknown'");
   ensureColumn(database, 'answers', 'analysis_confidence', "REAL NOT NULL DEFAULT 0");
+  ensureColumn(database, 'answers', 'source_mentioned', "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, 'answers', 'source_mention_count', "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, 'answers', 'source_matched_terms_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(database, 'answers', 'mention_backed_by_source', "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, 'answers', 'mention_without_source', "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, 'citations', 'brand_mentioned', "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, 'citations', 'matched_terms_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(database, 'platform_runs', 'profile_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, 'platform_runs', 'share_status', "TEXT NOT NULL DEFAULT 'unavailable'");
   ensureColumn(database, 'platform_runs', 'share_url', 'TEXT');

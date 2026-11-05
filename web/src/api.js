@@ -15,6 +15,7 @@ export const api = {
   createBrand: (body) => request('/api/brands', { method: 'POST', body: JSON.stringify(body) }),
   getBrandOverview: (brandId, days = 30) => request(`/api/brands/${brandId}/overview?days=${days}`),
   getBrandSources: (brandId, days = 30, platformId = '') => request(`/api/brands/${brandId}/sources?days=${days}${platformId ? `&platformId=${encodeURIComponent(platformId)}` : ''}`),
+  recomputeBrandAnalysis: (brandId) => request(`/api/brands/${brandId}/recompute-analysis`, { method: 'POST' }),
   listQuestions: (brandId) => request(`/api/brands/${brandId}/questions`),
   createQuestions: (brandId, body) => request(`/api/brands/${brandId}/questions`, { method: 'POST', body: JSON.stringify(body) }),
   updateQuestion: (questionId, body) => request(`/api/brands/questions/${questionId}`, { method: 'PATCH', body: JSON.stringify(body) }),

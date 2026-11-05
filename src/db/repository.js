@@ -1,7 +1,7 @@
 import { createId, now } from '../shared/ids.js';
 import { NotFoundError, ValidationError } from '../shared/errors.js';
 import { normalizeAccountIdentity, normalizeProfileId, profileIdFromAccount } from '../profiles/account-identity.js';
-import { analyzeBrandMentions, analyzeOwnedDomainCitations } from '../analysis/brand-analysis.js';
+import { analyzeBrandMentions, analyzeCitationMentions, analyzeMentionSupport, analyzeOwnedDomainCitations } from '../analysis/brand-analysis.js';
 
 const toBoolean = (value) => Boolean(value);
 
@@ -19,19 +19,39 @@ function listValue(value) {
   return [];
 }
 
-// 品牌提及分析统一走共享模块，保证与 skill 版本口径一致。
-function analyzeBrand(brand, content) {
-  const analysis = analyzeBrandMentions(content, {
+// 品牌口径统一走共享模块，保证与 skill 版本一致。
+function brandProfile(brand) {
+  return {
     name: brand?.name,
     aliases: parseJson(brand?.aliases_json, []),
     products: parseJson(brand?.products_json, []),
-  });
+    ownedDomains: parseJson(brand?.owned_domains_json, []),
+  };
+}
+
+function analyzeBrand(brand, content) {
+  const analysis = analyzeBrandMentions(content, brandProfile(brand));
   return {
     brandMentioned: analysis.mentioned,
     mentionCount: analysis.occurrences,
     matchedTerms: analysis.matches.map((match) => match.term),
     recommendation: 'unknown',
     analysisConfidence: analysis.matches.length ? 1 : 0,
+  };
+}
+
+// 引用源提及分析：基于已抓取的引用标题（平台渲染的来源卡片标题通常带摘要片段），
+// 判断来源本身是否提到品牌，不需要额外网络请求。
+function analyzeSourceMentions(brand, citations, answerAnalysis = {}) {
+  const source = analyzeCitationMentions(citations, brandProfile(brand));
+  const support = analyzeMentionSupport(answerAnalysis, { mentioned: source.mentioned });
+  return {
+    sourceMentioned: source.mentioned,
+    sourceMentionCount: source.count,
+    sourceMatchedTerms: source.matchedTerms,
+    mentionBackedBySource: support.mentionBackedBySource,
+    mentionWithoutSource: support.mentionWithoutSource,
+    rows: source.citations,
   };
 }
 
@@ -193,7 +213,57 @@ export class GeoRepository {
     };
     this.database.prepare(`UPDATE projects SET name = ?, description = ?, aliases_json = ?, products_json = ?, website = ?, owned_domains_json = ?, updated_at = ? WHERE id = ?`)
       .run(next.name, next.description, JSON.stringify(next.aliases), JSON.stringify(next.products), next.website, JSON.stringify(next.ownedDomains), now(), brandId);
+    // 品牌名、别名或产品词变化后，历史回答的命中口径需要跟着回算。
+    const signature = (parts) => JSON.stringify(parts);
+    if (signature([next.name, next.aliases, next.products]) !== signature([current.name, current.aliases, current.products])) {
+      this.recomputeBrandAnalysis(brandId);
+    }
     return this.getBrand(brandId);
+  }
+
+  // 重新计算某个品牌下全部回答的提及分析与来源提及分析。
+  // 完全基于已抓取的引用标题，不需要重新访问平台。
+  recomputeBrandAnalysis(brandId) {
+    const brand = this.getBrand(brandId);
+    const rows = this.database.prepare(`SELECT a.id AS answer_id, a.content, c.id AS citation_id, c.position, c.title, c.url, c.domain
+      FROM answers a JOIN platform_runs pr ON pr.id = a.platform_run_id JOIN runs r ON r.id = pr.run_id
+      LEFT JOIN citations c ON c.answer_id = a.id
+      WHERE r.project_id = ? ORDER BY a.created_at ASC`).all(brandId);
+
+    const answers = new Map();
+    for (const row of rows) {
+      if (!answers.has(row.answer_id)) {
+        answers.set(row.answer_id, { id: row.answer_id, content: row.content ?? '', citations: [] });
+      }
+      if (row.citation_id) {
+        answers.get(row.answer_id).citations.push({
+          id: row.citation_id, position: row.position, title: row.title ?? '', url: row.url, domain: row.domain,
+        });
+      }
+    }
+
+    const updateAnswer = this.database.prepare(`UPDATE answers SET brand_mentioned = ?, mention_count = ?, matched_terms_json = ?,
+      source_mentioned = ?, source_mention_count = ?, source_matched_terms_json = ?, mention_backed_by_source = ?, mention_without_source = ?
+      WHERE id = ?`);
+    const updateCitation = this.database.prepare('UPDATE citations SET brand_mentioned = ?, matched_terms_json = ? WHERE id = ?');
+
+    const write = this.database.transaction(() => {
+      for (const entry of answers.values()) {
+        const analysis = analyzeBrand(brand, entry.content);
+        const sourceAnalysis = analyzeSourceMentions(brand, entry.citations, analysis);
+        updateAnswer.run(analysis.brandMentioned ? 1 : 0, analysis.mentionCount, JSON.stringify(analysis.matchedTerms),
+          sourceAnalysis.sourceMentioned ? 1 : 0, sourceAnalysis.sourceMentionCount,
+          JSON.stringify(sourceAnalysis.sourceMatchedTerms), sourceAnalysis.mentionBackedBySource ? 1 : 0,
+          sourceAnalysis.mentionWithoutSource ? 1 : 0, entry.id);
+        const rowsByUrl = new Map(sourceAnalysis.rows.map((row) => [row.url, row]));
+        for (const citation of entry.citations) {
+          const row = rowsByUrl.get(citation.url);
+          updateCitation.run(row?.mentioned ? 1 : 0, JSON.stringify(row?.matchedTerms ?? []), citation.id);
+        }
+      }
+    });
+    write();
+    return { brandId, answers: answers.size };
   }
 
   updateProject(projectId, values) { return this.updateBrand(projectId, values); }
@@ -326,6 +396,11 @@ export class GeoRepository {
       matchedTerms: parseJson(answerRow.matched_terms_json, []),
       recommendation: answerRow.recommendation ?? 'unknown',
       analysisConfidence: Number(answerRow.analysis_confidence ?? 0),
+      sourceMentioned: toBoolean(answerRow.source_mentioned),
+      sourceMentionCount: Number(answerRow.source_mention_count ?? 0),
+      sourceMatchedTerms: parseJson(answerRow.source_matched_terms_json, []),
+      mentionBackedBySource: toBoolean(answerRow.mention_backed_by_source),
+      mentionWithoutSource: toBoolean(answerRow.mention_without_source),
       createdAt: answerRow.created_at,
       citations: [], artifacts: [],
     });
@@ -334,7 +409,8 @@ export class GeoRepository {
     for (const row of citationRows) {
       const answer = [...answerByPlatformRunId.values()].find((candidate) => candidate.id === row.answer_id);
       if (answer) answer.citations.push({ id: row.id, position: row.position, title: row.title, url: row.url, domain: row.domain,
-        citationFragments: parseJson(row.citation_fragments_json), citationOccurrences: row.citation_occurrences });
+        citationFragments: parseJson(row.citation_fragments_json), citationOccurrences: row.citation_occurrences,
+        brandMentioned: toBoolean(row.brand_mentioned), matchedTerms: parseJson(row.matched_terms_json, []) });
     }
     const artifactRows = this.database.prepare(`SELECT ar.* FROM artifacts ar JOIN platform_runs pr ON pr.id = ar.platform_run_id
       WHERE pr.run_id = ? ORDER BY ar.created_at ASC`).all(runId);
@@ -353,6 +429,7 @@ export class GeoRepository {
     const citations = this.database.prepare('SELECT * FROM citations WHERE answer_id = ? ORDER BY position ASC').all(answerId).map((citation) => ({
       id: citation.id, position: citation.position, title: citation.title, url: citation.url, domain: citation.domain,
       citationFragments: parseJson(citation.citation_fragments_json), citationOccurrences: citation.citation_occurrences,
+      brandMentioned: toBoolean(citation.brand_mentioned), matchedTerms: parseJson(citation.matched_terms_json, []),
     }));
     const artifacts = this.database.prepare('SELECT * FROM artifacts WHERE platform_run_id = ? ORDER BY created_at ASC').all(row.platform_run_id).map((artifact) => ({
       id: artifact.id, kind: artifact.kind, relativePath: artifact.relative_path, createdAt: artifact.created_at,
@@ -363,14 +440,19 @@ export class GeoRepository {
       displayedSourceLinkCount: row.displayed_source_link_count, capturedCardCount: row.captured_card_count,
       missingSourceIndexes: parseJson(row.missing_source_indexes_json, []),
       brandMentioned: toBoolean(row.brand_mentioned), mentionCount: Number(row.mention_count ?? 0), matchedTerms: parseJson(row.matched_terms_json, []),
-      recommendation: row.recommendation ?? 'unknown', analysisConfidence: Number(row.analysis_confidence ?? 0), createdAt: row.created_at, citations, artifacts };
+      recommendation: row.recommendation ?? 'unknown', analysisConfidence: Number(row.analysis_confidence ?? 0),
+      sourceMentioned: toBoolean(row.source_mentioned), sourceMentionCount: Number(row.source_mention_count ?? 0),
+      sourceMatchedTerms: parseJson(row.source_matched_terms_json, []),
+      mentionBackedBySource: toBoolean(row.mention_backed_by_source), mentionWithoutSource: toBoolean(row.mention_without_source),
+      createdAt: row.created_at, citations, artifacts };
   }
 
   getCitation(citationId) {
     const row = this.database.prepare(`SELECT c.*, a.platform_run_id FROM citations c JOIN answers a ON a.id = c.answer_id WHERE c.id = ?`).get(citationId);
     if (!row) throw new NotFoundError('未找到该引用网页。');
     return { id: row.id, answerId: row.answer_id, platformRunId: row.platform_run_id, position: row.position, title: row.title, url: row.url,
-      domain: row.domain, citationFragments: parseJson(row.citation_fragments_json), citationOccurrences: row.citation_occurrences, createdAt: row.created_at };
+      domain: row.domain, citationFragments: parseJson(row.citation_fragments_json), citationOccurrences: row.citation_occurrences,
+      brandMentioned: toBoolean(row.brand_mentioned), matchedTerms: parseJson(row.matched_terms_json, []), createdAt: row.created_at };
   }
 
   getPendingPlatformRuns(runId) {
@@ -396,20 +478,29 @@ export class GeoRepository {
     const brand = this.database.prepare(`SELECT p.* FROM projects p JOIN runs r ON r.project_id = p.id
       JOIN platform_runs pr ON pr.run_id = r.id WHERE pr.id = ?`).get(platformRunId);
     const analysis = analyzeBrand(brand, result.content ?? '');
+    const sourceAnalysis = analyzeSourceMentions(brand, result.citations ?? [], analysis);
+    const sourceRowsByUrl = new Map(sourceAnalysis.rows.map((row) => [row.url, row]));
     const write = this.database.transaction(() => {
       this.database.prepare(`UPDATE platform_runs SET status = 'completed', completed_at = ?, error_message = NULL, lease_id = NULL, lease_expires_at = NULL, share_status = ?, share_url = ? WHERE id = ?`).run(timestamp, result.shareStatus ?? 'unavailable', result.shareUrl ?? null, platformRunId);
       const answerId = createId();
       this.database.prepare(`INSERT INTO answers
-        (id, platform_run_id, content, response_url, source_panel_opened, platform_reported_count, displayed_source_link_count, captured_card_count, missing_source_indexes_json, brand_mentioned, mention_count, matched_terms_json, recommendation, analysis_confidence, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(answerId, platformRunId, result.content ?? '', result.responseUrl ?? null,
+        (id, platform_run_id, content, response_url, source_panel_opened, platform_reported_count, displayed_source_link_count, captured_card_count, missing_source_indexes_json, brand_mentioned, mention_count, matched_terms_json, recommendation, analysis_confidence, source_mentioned, source_mention_count, source_matched_terms_json, mention_backed_by_source, mention_without_source, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(answerId, platformRunId, result.content ?? '', result.responseUrl ?? null,
         result.sourcePanelOpened ? 1 : 0, result.platformReportedCount ?? null, result.displayedSourceLinkCount ?? null, result.capturedCardCount ?? null,
         JSON.stringify(result.missingSourceIndexes ?? []), analysis.brandMentioned ? 1 : 0, analysis.mentionCount,
-        JSON.stringify(analysis.matchedTerms), analysis.recommendation, analysis.analysisConfidence, timestamp);
+        JSON.stringify(analysis.matchedTerms), analysis.recommendation, analysis.analysisConfidence,
+        sourceAnalysis.sourceMentioned ? 1 : 0, sourceAnalysis.sourceMentionCount,
+        JSON.stringify(sourceAnalysis.sourceMatchedTerms), sourceAnalysis.mentionBackedBySource ? 1 : 0,
+        sourceAnalysis.mentionWithoutSource ? 1 : 0, timestamp);
       const citationStatement = this.database.prepare(`INSERT INTO citations
-        (id, answer_id, position, title, url, domain, citation_fragments_json, citation_occurrences, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-      for (const citation of result.citations ?? []) citationStatement.run(createId(), answerId, citation.position, citation.title ?? '', citation.url, citation.domain,
-        JSON.stringify(citation.citationFragments ?? []), citation.citationOccurrences ?? 0, timestamp);
+        (id, answer_id, position, title, url, domain, citation_fragments_json, citation_occurrences, brand_mentioned, matched_terms_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const citation of result.citations ?? []) {
+        const sourceRow = sourceRowsByUrl.get(citation.url);
+        citationStatement.run(createId(), answerId, citation.position, citation.title ?? '', citation.url, citation.domain,
+          JSON.stringify(citation.citationFragments ?? []), citation.citationOccurrences ?? 0,
+          sourceRow?.mentioned ? 1 : 0, JSON.stringify(sourceRow?.matchedTerms ?? []), timestamp);
+      }
       const artifactStatement = this.database.prepare('INSERT INTO artifacts (id, platform_run_id, kind, relative_path, created_at) VALUES (?, ?, ?, ?, ?)');
       for (const artifact of result.artifacts ?? []) artifactStatement.run(createId(), platformRunId, artifact.kind, artifact.relativePath, timestamp);
     });
@@ -423,6 +514,7 @@ export class GeoRepository {
     const rows = this.database.prepare(`SELECT pr.id, pr.prompt_id, pr.platform_id, pr.status, pr.error_message, pr.created_at,
       p.text AS prompt_text, p.category AS prompt_category, a.id AS answer_id, a.brand_mentioned, a.mention_count,
       a.recommendation, a.source_panel_opened, a.platform_reported_count,
+      a.source_mentioned, a.source_mention_count, a.mention_backed_by_source, a.mention_without_source,
       (SELECT COUNT(*) FROM citations c WHERE c.answer_id = a.id) AS citation_count,
       (SELECT COALESCE(SUM(c.citation_occurrences), 0) FROM citations c WHERE c.answer_id = a.id) AS citation_occurrences
       FROM platform_runs pr JOIN runs r ON r.id = pr.run_id JOIN prompts p ON p.id = pr.prompt_id
@@ -433,9 +525,15 @@ export class GeoRepository {
       const valid = items.filter((row) => row.status === 'completed' && row.answer_id);
       const mentioned = valid.filter((row) => toBoolean(row.brand_mentioned)).length;
       const cited = valid.filter((row) => Number(row.citation_count) > 0).length;
+      const sourceMentioned = valid.filter((row) => toBoolean(row.source_mentioned)).length;
+      const mentionBacked = valid.filter((row) => toBoolean(row.mention_backed_by_source)).length;
+      const mentionUnsupported = valid.filter((row) => toBoolean(row.mention_without_source)).length;
       return { checks: items.length, completed: valid.length, mentioned, mentionRate: valid.length ? Math.round((mentioned / valid.length) * 1000) / 10 : null,
         cited, citationRate: valid.length ? Math.round((cited / valid.length) * 1000) / 10 : null,
-        citations: items.reduce((total, row) => total + Number(row.citation_occurrences || 0), 0), failures: items.filter((row) => row.status === 'failed').length };
+        citations: items.reduce((total, row) => total + Number(row.citation_occurrences || 0), 0), failures: items.filter((row) => row.status === 'failed').length,
+        sourceMentioned, sourceMentionRate: valid.length ? Math.round((sourceMentioned / valid.length) * 1000) / 10 : null,
+        mentionBacked, mentionUnsupported,
+        sourceBackedRate: valid.length ? Math.round((mentionBacked / valid.length) * 1000) / 10 : null };
     };
     const platformIds = [...new Set(rows.map((row) => row.platform_id))];
     const platforms = platformIds.map((platform) => ({ platform, ...summarize(rows.filter((row) => row.platform_id === platform)) }));
@@ -462,6 +560,7 @@ export class GeoRepository {
     const wherePlatform = platformId ? 'AND pr.platform_id = ?' : '';
     const params = platformId ? [brandId, platformId] : [brandId];
     const rawRows = this.database.prepare(`SELECT c.url, c.title, c.domain, c.citation_occurrences, c.created_at, pr.platform_id,
+      c.brand_mentioned, c.matched_terms_json,
       p.id AS prompt_id, p.text AS prompt_text, a.id AS answer_id
       FROM citations c JOIN answers a ON a.id = c.answer_id JOIN platform_runs pr ON pr.id = a.platform_run_id
       JOIN runs r ON r.id = pr.run_id JOIN prompts p ON p.id = pr.prompt_id
@@ -469,13 +568,17 @@ export class GeoRepository {
     const rows = rawRows.filter((row) => new Date(row.created_at).getTime() >= sinceTime);
     const byUrl = new Map();
     for (const row of rows) {
-      const item = byUrl.get(row.url) ?? { url: row.url, title: row.title, domain: row.domain, platforms: [], promptIds: [], prompts: [], citationCount: 0, citationOccurrences: 0, firstSeenAt: row.created_at, lastSeenAt: row.created_at };
+      const item = byUrl.get(row.url) ?? { url: row.url, title: row.title, domain: row.domain, platforms: [], promptIds: [], prompts: [], citationCount: 0, citationOccurrences: 0, brandMentioned: false, matchedTerms: [], firstSeenAt: row.created_at, lastSeenAt: row.created_at };
       byUrl.set(row.url, item);
       if (row.title && !item.title) item.title = row.title;
       if (!item.platforms.includes(row.platform_id)) item.platforms.push(row.platform_id);
       if (!item.promptIds.includes(row.prompt_id)) { item.promptIds.push(row.prompt_id); item.prompts.push(row.prompt_text); }
       item.citationCount += 1;
       item.citationOccurrences += Number(row.citation_occurrences || 0);
+      if (toBoolean(row.brand_mentioned)) item.brandMentioned = true;
+      for (const term of parseJson(row.matched_terms_json, [])) {
+        if (!item.matchedTerms.includes(term)) item.matchedTerms.push(term);
+      }
       if (row.created_at < item.firstSeenAt) item.firstSeenAt = row.created_at;
       if (row.created_at > item.lastSeenAt) item.lastSeenAt = row.created_at;
     }
@@ -490,6 +593,10 @@ export class GeoRepository {
         citationOccurrences: sources.reduce((total, item) => total + item.citationOccurrences, 0),
         ownedDomainCitations: owned.count,
         ownedDomainCited: owned.cited,
+        sourceMentionedUrls: sources.filter((item) => item.brandMentioned).length,
+        sourceMentionedRate: sources.length
+          ? Math.round((sources.filter((item) => item.brandMentioned).length / sources.length) * 1000) / 10
+          : null,
         periodDays: safeDays,
       },
       ownedDomains: { cited: owned.cited, count: owned.count, citations: owned.citations },

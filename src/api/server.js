@@ -141,6 +141,8 @@ export function buildServer({
   app.get('/api/brands/:brandId/sources', async (request) => repo.getBrandSources(request.params.brandId, {
     days: request.query.days, platformId: request.query.platformId,
   }));
+  // 品牌名、别名或产品词调整后，可以手动回算历史回答的提及口径。
+  app.post('/api/brands/:brandId/recompute-analysis', async (request) => repo.recomputeBrandAnalysis(request.params.brandId));
 
   app.get('/api/projects', async () => repo.listProjects());
   app.post('/api/projects', async (request, reply) => {

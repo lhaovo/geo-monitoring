@@ -80,7 +80,6 @@ function mapPrompt(row) {
     brandId: row.project_id,
     projectId: row.project_id,
     text: row.text,
-    category: row.category ?? '',
     enabled: toBoolean(row.enabled),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -149,7 +148,6 @@ function mapPlatformRun(row) {
     prompt: row.prompt_text === undefined ? undefined : {
       id: row.prompt_id,
       text: row.prompt_text,
-      category: row.prompt_category ?? '',
     },
   };
 }
@@ -270,8 +268,30 @@ export class GeoRepository {
 
   listPrompts(brandId) {
     this.getBrand(brandId);
-    return this.database.prepare('SELECT * FROM prompts WHERE project_id = ? ORDER BY created_at ASC')
+    const prompts = this.database.prepare('SELECT * FROM prompts WHERE project_id = ? ORDER BY created_at ASC')
       .all(brandId).map(mapPrompt);
+    // 附带近30 天的品牌命中率，列表里可以直接看出每个问题的表现。
+    const since = new Date(Date.now() - 30 * 86400000).toISOString();
+    const rows = this.database.prepare(`SELECT pr.prompt_id, a.brand_mentioned
+      FROM platform_runs pr JOIN runs r ON r.id = pr.run_id
+      LEFT JOIN answers a ON a.platform_run_id = pr.id
+      WHERE r.project_id = ? AND r.created_at >= ? AND pr.status = 'completed' AND a.id IS NOT NULL`).all(brandId, since);
+    const stats = new Map();
+    for (const row of rows) {
+      const item = stats.get(row.prompt_id) ?? { completed: 0, mentioned: 0 };
+      item.completed += 1;
+      if (toBoolean(row.brand_mentioned)) item.mentioned += 1;
+      stats.set(row.prompt_id, item);
+    }
+    return prompts.map((prompt) => {
+      const stat = stats.get(prompt.id);
+      return {
+        ...prompt,
+        checks: stat?.completed ?? 0,
+        mentioned: stat?.mentioned ?? 0,
+        mentionRate: stat?.completed ? Math.round((stat.mentioned / stat.completed) * 1000) / 10 : null,
+      };
+    });
   }
 
   getPrompt(promptId) {
@@ -280,13 +300,13 @@ export class GeoRepository {
     return prompt;
   }
 
-  createPrompt(brandId, { text, category = '', enabled = true }) {
+  createPrompt(brandId, { text, enabled = true }) {
     this.getBrand(brandId);
     if (!text?.trim()) throw new ValidationError('监控问题不能为空。');
     const timestamp = now();
-    const prompt = { id: createId(), brandId, text: text.trim(), category: String(category ?? '').trim(), enabled: enabled ? 1 : 0, timestamp };
-    this.database.prepare(`INSERT INTO prompts (id, project_id, text, category, enabled, created_at, updated_at)
-      VALUES (@id, @brandId, @text, @category, @enabled, @timestamp, @timestamp)`).run(prompt);
+    const prompt = { id: createId(), brandId, text: text.trim(), enabled: enabled ? 1 : 0, timestamp };
+    this.database.prepare(`INSERT INTO prompts (id, project_id, text, enabled, created_at, updated_at)
+      VALUES (@id, @brandId, @text, @enabled, @timestamp, @timestamp)`).run(prompt);
     return this.getPrompt(prompt.id);
   }
 
@@ -294,10 +314,9 @@ export class GeoRepository {
     const current = this.getPrompt(promptId);
     const text = values.text === undefined ? current.text : String(values.text).trim();
     if (!text) throw new ValidationError('监控问题不能为空。');
-    const category = values.category === undefined ? current.category : String(values.category ?? '').trim();
     const enabled = values.enabled === undefined ? current.enabled : Boolean(values.enabled);
-    this.database.prepare('UPDATE prompts SET text = ?, category = ?, enabled = ?, updated_at = ? WHERE id = ?')
-      .run(text, category, enabled ? 1 : 0, now(), promptId);
+    this.database.prepare('UPDATE prompts SET text = ?, enabled = ?, updated_at = ? WHERE id = ?')
+      .run(text, enabled ? 1 : 0, now(), promptId);
     return this.getPrompt(promptId);
   }
 
@@ -377,7 +396,7 @@ export class GeoRepository {
 
   getRunDetail(runId) {
     const run = this.getRun(runId);
-    const platformRuns = this.database.prepare(`SELECT pr.*, p.text AS prompt_text, p.category AS prompt_category
+    const platformRuns = this.database.prepare(`SELECT pr.*, p.text AS prompt_text
       FROM platform_runs pr JOIN prompts p ON p.id = pr.prompt_id WHERE pr.run_id = ? ORDER BY pr.created_at ASC`).all(runId).map(mapPlatformRun);
     const answerByPlatformRunId = new Map();
     const answerRows = this.database.prepare(`SELECT a.* FROM answers a JOIN platform_runs pr
@@ -423,7 +442,7 @@ export class GeoRepository {
 
   getAnswer(answerId) {
     const row = this.database.prepare(`SELECT a.*, pr.run_id, pr.prompt_id, pr.platform_id, pr.mode AS platform_run_mode,
-      pr.status AS platform_run_status, p.text AS prompt_text, p.category AS prompt_category
+      pr.status AS platform_run_status, p.text AS prompt_text
       FROM answers a JOIN platform_runs pr ON pr.id = a.platform_run_id JOIN prompts p ON p.id = pr.prompt_id WHERE a.id = ?`).get(answerId);
     if (!row) throw new NotFoundError('未找到该平台回答。');
     const citations = this.database.prepare('SELECT * FROM citations WHERE answer_id = ? ORDER BY position ASC').all(answerId).map((citation) => ({
@@ -435,7 +454,7 @@ export class GeoRepository {
       id: artifact.id, kind: artifact.kind, relativePath: artifact.relative_path, createdAt: artifact.created_at,
     }));
     return { id: row.id, platformRunId: row.platform_run_id, runId: row.run_id, platformId: row.platform_id, mode: row.platform_run_mode,
-      platformRunStatus: row.platform_run_status, prompt: { id: row.prompt_id, text: row.prompt_text, category: row.prompt_category ?? '' },
+      platformRunStatus: row.platform_run_status, prompt: { id: row.prompt_id, text: row.prompt_text },
       content: row.content, responseUrl: row.response_url, sourcePanelOpened: toBoolean(row.source_panel_opened), platformReportedCount: row.platform_reported_count,
       displayedSourceLinkCount: row.displayed_source_link_count, capturedCardCount: row.captured_card_count,
       missingSourceIndexes: parseJson(row.missing_source_indexes_json, []),
@@ -457,7 +476,7 @@ export class GeoRepository {
 
   getPendingPlatformRuns(runId) {
     this.getRun(runId);
-    return this.database.prepare(`SELECT pr.*, p.text AS prompt_text, p.category AS prompt_category, r.cancel_requested_at
+    return this.database.prepare(`SELECT pr.*, p.text AS prompt_text, r.cancel_requested_at
       FROM platform_runs pr JOIN prompts p ON p.id = pr.prompt_id JOIN runs r ON r.id = pr.run_id
       WHERE pr.run_id = ? AND pr.status = 'queued' ORDER BY pr.created_at ASC`).all(runId).map(mapPlatformRun);
   }
@@ -512,7 +531,7 @@ export class GeoRepository {
     const safeDays = Math.max(1, Math.min(Number(days) || 30, 3650));
     const since = new Date(Date.now() - safeDays * 86400000).toISOString();
     const rows = this.database.prepare(`SELECT pr.id, pr.prompt_id, pr.platform_id, pr.status, pr.error_message, pr.created_at,
-      p.text AS prompt_text, p.category AS prompt_category, a.id AS answer_id, a.brand_mentioned, a.mention_count,
+      p.text AS prompt_text, a.id AS answer_id, a.brand_mentioned, a.mention_count,
       a.recommendation, a.source_panel_opened, a.platform_reported_count,
       a.source_mentioned, a.source_mention_count, a.mention_backed_by_source, a.mention_without_source,
       (SELECT COUNT(*) FROM citations c WHERE c.answer_id = a.id) AS citation_count,
@@ -540,7 +559,7 @@ export class GeoRepository {
     const promptIds = [...new Set(rows.map((row) => row.prompt_id))];
     const questions = promptIds.map((promptId) => {
       const first = rows.find((row) => row.prompt_id === promptId);
-      return { id: promptId, text: first?.prompt_text ?? '', category: first?.prompt_category ?? '', ...summarize(rows.filter((row) => row.prompt_id === promptId)) };
+      return { id: promptId, text: first?.prompt_text ?? '', ...summarize(rows.filter((row) => row.prompt_id === promptId)) };
     });
     const byDay = new Map();
     for (const row of completed) {
@@ -762,7 +781,7 @@ export class GeoRepository {
 
   claimNextPlatformRun(runId, platformId, { leaseId, leaseExpiresAt }) {
     const claim = this.database.transaction(() => {
-      const row = this.database.prepare(`SELECT pr.*, p.text AS prompt_text, p.category AS prompt_category
+      const row = this.database.prepare(`SELECT pr.*, p.text AS prompt_text
         FROM platform_runs pr JOIN prompts p ON p.id = pr.prompt_id
         WHERE pr.run_id = ? AND pr.platform_id = ? AND pr.status = 'queued' ORDER BY pr.created_at ASC LIMIT 1`).get(runId, platformId);
       if (!row) return null;
@@ -771,7 +790,7 @@ export class GeoRepository {
             started_at = COALESCE(started_at, ?), error_message = NULL
         WHERE id = ? AND status = 'queued'`).run(leaseId, leaseExpiresAt, now(), row.id);
       if (!updated.changes) return null;
-      return this.database.prepare(`SELECT pr.*, p.text AS prompt_text, p.category AS prompt_category
+      return this.database.prepare(`SELECT pr.*, p.text AS prompt_text
         FROM platform_runs pr JOIN prompts p ON p.id = pr.prompt_id WHERE pr.id = ?`).get(row.id);
     })();
     return claim ? mapPlatformRun(claim) : null;

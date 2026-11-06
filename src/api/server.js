@@ -73,7 +73,7 @@ export function buildServer({
       label: platform.label,
       entryUrl: platform.entryUrl,
       defaultMode: platform.defaultMode ?? (platform.id === 'doubao' ? 'headed' : 'headless'),
-      loginStatus: profiles.length === 0 ? 'unknown' : healthy > 0 ? 'ready' : restricted > 0 ? 'restricted' : 'unknown',
+      loginStatus: profiles.length === 0 ? 'none' : healthy > 0 ? 'ready' : restricted > 0 ? 'restricted' : 'unknown',
       riskLevel: platform.id === 'doubao' ? 'elevated' : 'normal',
       profiles,
       profileSummary: {
@@ -157,7 +157,7 @@ export function buildServer({
   app.get('/api/projects/:projectId/prompts', async (request) => repo.listPrompts(request.params.projectId));
   app.post('/api/projects/:projectId/prompts', async (request, reply) => {
     const body = requireBody(request.body);
-    const prompt = repo.createPrompt(request.params.projectId, { text: requireString(body.text, '监控问题'), category: body.category, enabled: body.enabled ?? true });
+    const prompt = repo.createPrompt(request.params.projectId, { text: requireString(body.text, '监控问题'), enabled: body.enabled ?? true });
     return reply.status(201).send(prompt);
   });
   app.get('/api/brands/:brandId/questions', async (request) => repo.listPrompts(request.params.brandId));
@@ -166,7 +166,7 @@ export function buildServer({
     const texts = Array.isArray(body.texts) ? body.texts : [body.text];
     const uniqueTexts = [...new Set(texts.map((text) => String(text ?? '').trim()).filter(Boolean))];
     if (!uniqueTexts.length) throw new ValidationError('至少提供一个监控问题。');
-    const questions = uniqueTexts.map((text) => repo.createPrompt(request.params.brandId, { text, category: body.category, enabled: body.enabled ?? true }));
+    const questions = uniqueTexts.map((text) => repo.createPrompt(request.params.brandId, { text, enabled: body.enabled ?? true }));
     return reply.status(201).send({ questions, imported: uniqueTexts.length, duplicates: texts.length - uniqueTexts.length });
   });
   app.patch('/api/brands/questions/:questionId', async (request) => repo.updatePrompt(request.params.questionId, requireBody(request.body)));

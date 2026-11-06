@@ -13,6 +13,17 @@ async function json(app, options) {
   return { response, body: response.body ? response.json() : null };
 }
 
+// 监控任务必须绑定到具体账号，没有可用账号时不会执行，这里为相关平台准备可用登录态。
+async function createReadyProfiles(app, platformIds) {
+  for (const platformId of platformIds) {
+    const created = await json(app, {
+      method: 'POST', url: '/api/profiles',
+      payload: { platformId, account: `1322060215${platformIds.indexOf(platformId)}` },
+    });
+    await json(app, { method: 'PATCH', url: `/api/profiles/${created.body.id}`, payload: { health: 'ready' } });
+  }
+}
+
 test('creates a project, queues a run, and persists an answer with citations', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
   const executedModes = [];
@@ -40,6 +51,7 @@ test('creates a project, queues a run, and persists an answer with citations', a
     },
   });
   try {
+    await createReadyProfiles(app, ['deepseek', 'kimi']);
     const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '药品监测' } });
     assert.equal(project.response.statusCode, 201);
     const prompt = await json(app, {
@@ -124,6 +136,7 @@ test('runs a global concurrency pool while serializing each platform', async () 
     },
   });
   try {
+    await createReadyProfiles(app, ['deepseek', 'kimi', 'doubao']);
     const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '并发测试' } });
     const promptOne = await json(app, {
       method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '问题一' },
@@ -177,6 +190,7 @@ test('force-cancels active browser work and marks the run immediately', async ()
     },
   });
   try {
+    await createReadyProfiles(app, ['kimi']);
     const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '取消测试' } });
     const prompt = await json(app, {
       method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '会被取消的问题' },
@@ -378,6 +392,7 @@ test('stores the share link collected for a platform run', async () => {
     }),
   });
   try {
+    await createReadyProfiles(app, ['deepseek']);
     const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '分享测试' } });
     const prompt = await json(app, {
       method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '带分享的问题' },
@@ -435,6 +450,7 @@ test('calculates brand mention rate and keeps source evidence for brand monitori
     }),
   });
   try {
+    await createReadyProfiles(app, ['deepseek']);
     const brand = await json(app, {
       method: 'POST',
       url: '/api/brands',
@@ -443,7 +459,7 @@ test('calculates brand mention rate and keeps source evidence for brand monitori
     const questions = await json(app, {
       method: 'POST',
       url: `/api/brands/${brand.body.id}/questions`,
-      payload: { texts: ['第一次买哪个牌子更稳？'], category: '购买决策' },
+      payload: { texts: ['第一次买哪个牌子更稳？'] },
     });
     const run = await json(app, {
       method: 'POST',
@@ -500,7 +516,7 @@ test('refuses to run when the platform has no ready login profile', async () => 
     assert.equal(executed, false);
     const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
     assert.equal(detail.body.platformRuns[0].status, 'failed');
-    assert.match(detail.body.platformRuns[0].errorMessage, /还没有可用的登录态/);
+    assert.match(detail.body.platformRuns[0].errorMessage, /没有可用的登录账号/);
   } finally {
     await app.close();
     await rm(dataDirectory, { recursive: true, force: true });

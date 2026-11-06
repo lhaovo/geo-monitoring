@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolveBrowserExecutable } from '../src/browser.js';
-import { describeAuthentication } from '../src/launcher.js';
+import { describeAuthentication } from '../src/login/authentication.js';
 
 test('uses a configured browser before detected candidates', () => {
   const executable = resolveBrowserExecutable({

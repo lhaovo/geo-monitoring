@@ -1,6 +1,6 @@
 ﻿import { chromium } from 'playwright';
 import { resolveBrowserExecutable } from '../browser.js';
-import { describeAuthentication } from '../launcher.js';
+import { describeAuthentication } from './authentication.js';
 import { getPlatformAdapter } from '../platforms/index.js';
 import { profilePaths } from '../profiles/profile-paths.js';
 import { normalizeAccountIdentity } from '../profiles/account-identity.js';

@@ -53,28 +53,9 @@ export GEO_BROWSER_PATH=/usr/bin/google-chrome
 
 右侧账号列表按行列出该平台下的全部账号（状态、最近登录、最近使用），行内可以「登录」/「重新登录」与「停用」。页面顶部的「正在登录」面板会显示等待人工操作的会话，也可以直接点「关闭窗口」结束。
 
-命令行方式仍然可用：
+同一个平台的登录窗口和采集任务不能同时使用同一账号，否则 Chrome 会因 Profile 锁而启动失败。
 
-```bash
-npm run open:deepseek
-npm run open:doubao
-npm run open:kimi
-npm run open:qwen
-npm run open:wenxiaoyan
-npm run open:yuanbao
-```
-
-上述命令会打开该平台的可见浏览器窗口，手动登录后关闭窗口即可。该流程会把登录态保存在平台默认目录 `data/profiles/<platform>`。
-
-如果需要为同一个平台维护多个账号，也可以用命令行单独登录某个账号：
-
-```bash
-npm run login -- wenxiaoyan 13800000000
-```
-
-登录完成后命令会自动把该登录态标记为可用。
-
-同一个平台的登录窗口和采集任务不能同时使用同一 Profile，否则 Chrome 会因 Profile 锁而启动失败。
+登录态只能通过网页端创建：没有账号就没有登录态，平台会显示「无」，对应平台的监控任务会以 `login_required` 失败并给出中文提示。
 
 ### 3. 开发模式
 
@@ -111,10 +92,9 @@ HOST=0.0.0.0 PORT=3030 GEO_BROWSER_PATH=/usr/bin/google-chrome npm start
 | --- | --- |
 | 唯一标识 | Profile ID 由账号派生：手机号归一化为 E.164 形式，其他账号按 NFKC 归一化后取小写，保证同一账号始终映射到同一个 Profile |
 | 存储目录 | `data/profiles/<platform>/<profileId>/chrome`，每个账号一个独立目录，Cookie 与 LocalStorage 互不覆盖 |
-| 兼容目录 | 平台上没有任何 Profile 记录时，沿用平台默认目录 `data/profiles/<platform>`，兼容旧的手工登录流程 |
 | 健康状态 | `new` 新建未登录、`ready` 可用、`expired` 登录过期、`error` 采集出错、`restricted` 账号受限、`disabled` 已停用 |
 | 自动选取 | 只有 `ready` 状态的 Profile 会被自动选中，避免用未登录账号跑出空回答 |
-| 缺登录态 | 平台存在 Profile 记录但没有 `ready` 时，任务以 `login_required` 直接失败并给出中文提示，不会静默重试 |
+| 缺登录态 | 平台没有账号、或没有 `ready` 的账号时，任务以 `login_required` 直接失败并给出中文提示，不会静默重试，也不会退回平台默认目录 |
 | 任务成功 | 采集成功后自动把该 Profile 标记为 `ready` 并刷新最近使用时间 |
 | 网页端登录 | 「平台与登录状态」页面左侧选「全部平台」或单个平台、右侧管账号，右上角「添加账号」即可创建登录态并打开登录窗口，关闭窗口后自动复验登录结果 |
 
@@ -161,10 +141,6 @@ HOST=0.0.0.0 PORT=3030 GEO_BROWSER_PATH=/usr/bin/google-chrome npm start
 | `npm run web` | 启动 Vite 前端开发服务器 |
 | `npm run build:web` | 构建前端 |
 | `npm start` | 启动生产服务 |
-| `npm run open:<platform>` | 打开指定平台的可见登录窗口 |
-| `npm run login -- <platform> [profileId]` | 为指定登录态打开登录窗口，完成后标记为可用 |
-| `npm run login -- <platform> [profileId]` | 为指定登录态打开登录窗口，完成后标记为可用（网页端同样支持） |
-| `npm run ask -- "问题"` | 通过 CLI 同时打开配置的平台并提交调试问题 |
 
 ## 目录结构
 

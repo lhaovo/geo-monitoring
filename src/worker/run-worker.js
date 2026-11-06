@@ -157,20 +157,17 @@ export class RunWorker extends EventEmitter {
     }
   }
 
-  // 为任务绑定一个可用的登录态 Profile：Profile 决定浏览器用户数据目录，
+  // 为任务绑定一个可用的登录账号：账号决定浏览器用户数据目录，
   // 不同账号的登录态互相隔离。
-  // 该平台没有任何登录态时沿用平台默认目录（兼容手工登录流程）；
-  // 存在登录态但没有可用账号时直接报错，避免产出空回答。
+  // 该平台没有任何登录账号时直接报错，不再退回平台默认目录，避免产出空回答。
   bindProfile(platformRun) {
     if (platformRun.profileId) {
       const existing = this.repository.getProfileByBinding(platformRun.platformId, platformRun.profileId);
       if (existing) return platformRun;
     }
-    const profiles = this.repository.listProfiles({ platformId: platformRun.platformId });
-    if (profiles.length === 0) return platformRun;
     const profile = this.repository.pickAvailableProfile(platformRun.platformId);
     if (!profile) {
-      const error = new Error(`${platformRun.platformId} 还没有可用的登录态，请先完成登录并把登录态状态改为 ready。`);
+      const error = new Error(`${platformRun.platformId} 没有可用的登录账号，请先在「平台与登录」页面添加账号并完成登录。`);
       error.code = 'login_required';
       throw error;
     }

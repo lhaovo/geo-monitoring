@@ -11,7 +11,6 @@ export function profilePaths(paths, platformId, profileId) {
   return {
     root,
     platformDirectory,
-    platformIndex: path.join(platformDirectory, 'index.json'),
     profileDirectory,
     metadata: path.join(profileDirectory, 'profile.json'),
     chromeDirectory: path.join(profileDirectory, 'chrome'),

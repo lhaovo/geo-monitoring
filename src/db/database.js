@@ -21,7 +21,6 @@ const SCHEMA = `
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -150,6 +149,17 @@ function ensureColumn(database, tableName, columnName, definition) {
   }
 }
 
+// 删除已经废弃的列；旧版 SQLite 不支持 DROP COLUMN 时保留旧列，但应用层不再读写它。
+function dropColumn(database, tableName, columnName) {
+  const columns = database.pragma(`table_info(${tableName})`);
+  if (!columns.some((column) => column.name === columnName)) return;
+  try {
+    database.exec(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`);
+  } catch {
+    // 忽略：保留旧列不影响功能。
+  }
+}
+
 export function openDatabase(databasePath) {
   mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new Database(databasePath);
@@ -162,7 +172,7 @@ export function openDatabase(databasePath) {
   ensureColumn(database, 'projects', 'products_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(database, 'projects', 'website', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, 'projects', 'owned_domains_json', "TEXT NOT NULL DEFAULT '[]'");
-  ensureColumn(database, 'prompts', 'category', "TEXT NOT NULL DEFAULT ''");
+  dropColumn(database, 'prompts', 'category');
   ensureColumn(database, 'platform_runs', 'mode', "TEXT NOT NULL DEFAULT 'headless'");
   ensureColumn(database, 'runs', 'concurrency', 'INTEGER NOT NULL DEFAULT 3');
   ensureColumn(database, 'runs', 'append_search_prompt', 'INTEGER NOT NULL DEFAULT 0');

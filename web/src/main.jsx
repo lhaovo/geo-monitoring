@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { api } from './api.js';
 import './styles.css';
@@ -68,19 +69,87 @@ function EmptyState({ title, description, action }) {
   return <div className="empty-state"><div className="empty-mark">＋</div><strong>{title}</strong><p>{description}</p>{action}</div>;
 }
 
+function BrandPicker({ brands, brand, onSelect, onCreate }) {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState({ top: 0, left: 0, width: 0 });
+  const fieldRef = useRef(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const measure = () => {
+      const el = triggerRef.current;
+      if (!el) return;
+      const box = el.getBoundingClientRect();
+      setRect({ top: box.bottom + 6, left: box.left, width: box.width });
+    };
+    measure();
+    window.addEventListener('scroll', measure, true);
+    window.addEventListener('resize', measure);
+    const onPointerDown = (event) => {
+      const inField = fieldRef.current?.contains(event.target);
+      const inMenu = menuRef.current?.contains(event.target);
+      if (!inField && !inMenu) setOpen(false);
+    };
+    const onKeyDown = (event) => { if (event.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('scroll', measure, true);
+      window.removeEventListener('resize', measure);
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  return <>
+    <div className="brand-picker">
+      <div className="brand-picker-field" ref={fieldRef}>
+        <button type="button" ref={triggerRef} className={`brand-picker-trigger ${open ? 'open' : ''}`} onClick={() => setOpen((value) => !value)} disabled={!brands.length} aria-haspopup="listbox" aria-expanded={open}>
+          <span className="brand-avatar">{brand?.name ? brand.name.slice(0, 1) : '·'}</span>
+          <span className="brand-picker-name">{brand?.name || '选择品牌'}</span>
+          <span className="brand-chevron">▾</span>
+        </button>
+      </div>
+      <button type="button" className="brand-picker-add" aria-label="新建品牌" onClick={onCreate}>＋</button>
+    </div>
+    {open ? createPortal(
+      <div className="brand-picker-menu" ref={menuRef} role="listbox" style={{ top: `${rect.top}px`, left: `${rect.left}px`, width: `${rect.width}px` }}>
+        {brands.map((item) => (
+          <button key={item.id} type="button" role="option" aria-selected={item.id === brand?.id} className={`brand-picker-option ${item.id === brand?.id ? 'active' : ''}`} onClick={() => { onSelect(item.id); setOpen(false); }}>
+            <span className="brand-avatar">{item.name.slice(0, 1)}</span>
+            <span className="brand-option-name">{item.name}</span>
+            {item.id === brand?.id ? <span className="brand-option-check">✓</span> : null}
+          </button>
+        ))}
+        {!brands.length ? <p className="brand-picker-empty">还没有品牌，先新建一个</p> : null}
+      </div>,
+      document.body,
+    ) : null}
+  </>;
+}
+
 function AppShell({ brands, brand, view, onNavigate, onSelectBrand, onNewBrand, onNewRun, children }) {
   const nav = [
     ['overview', '品牌总览', '⌂'], ['questions', '监控问题', '◇'], ['runs', '监控任务', '▦'], ['sources', '来源中心', '↗'], ['trends', '历史趋势', '⌁'], ['reports', '报告中心', '▤'],
   ];
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand-mark"><span className="brand-logo">G</span><div><strong>GEO Signal</strong><small>品牌可见度监测</small></div></div>
+      <div className="brand-mark"><span className="brand-logo">G</span><div><strong>GEO Monitoring</strong><small>品牌可见度监测</small></div></div>
+
       <div className="side-section-label">当前品牌</div>
-      <div className="brand-picker"><select value={brand?.id || ''} onChange={(event) => onSelectBrand(event.target.value)} disabled={!brands.length}><option value="">选择品牌</option>{brands.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button aria-label="新建品牌" onClick={onNewBrand}>＋</button></div>
+      <BrandPicker brands={brands} brand={brand} onSelect={onSelectBrand} onCreate={onNewBrand} />
+
+      <div className="side-section-label side-nav-label">功能导航</div>
       <nav className="side-nav">{nav.map(([key, label, icon]) => <button key={key} className={view === key ? 'active' : ''} onClick={() => onNavigate(key)} disabled={!brand}><span className="nav-icon">{icon}</span>{label}</button>)}</nav>
-      <div className="side-divider" />
-      <nav className="side-nav secondary"><button className={view === 'platforms' ? 'active' : ''} onClick={() => onNavigate('platforms')}><span className="nav-icon">◎</span>平台与登录</button><button onClick={onNewRun} disabled={!brand}><span className="nav-icon">＋</span>发起一次监控</button></nav>
-      <div className="sidebar-foot"><span className="online-dot" />采集服务在线<span className="version">v0.2 brand-first</span></div>
+
+      <div className="side-section-label side-nav-label">系统</div>
+      <nav className="side-nav secondary"><button className={view === 'platforms' ? 'active' : ''} onClick={() => onNavigate('platforms')}><span className="nav-icon">◎</span>平台与登录</button></nav>
+
+      <button className="side-cta" onClick={onNewRun} disabled={!brand}><span className="side-cta-icon">＋</span>发起一次监控</button>
+
+      <div className="sidebar-foot"><span className="online-dot" /><div className="sidebar-foot-text"><strong>采集服务在线</strong><small>浏览器自动化采集运行中</small></div></div>
     </aside>
     <div className="main-shell">
       <header className="topbar"><div><div className="top-eyebrow">BRAND VISIBILITY / 浏览器自动化采集</div><h1>{brand?.name || '品牌中心'}</h1></div><div className="top-actions"><span className="top-status"><span className="online-dot" />服务正常</span><button className="button primary" onClick={onNewRun} disabled={!brand}>立即监控</button></div></header>
@@ -115,24 +184,21 @@ function OverviewPage({ overview, onNewRun, onOpenRun, onNavigate }) {
 
 function QuestionsPage({ questions, onReload, onNewRun }) {
   const [search, setSearch] = useState('');
-  const [category, setCategory] = useState('');
   const [draft, setDraft] = useState('');
-  const [draftCategory, setDraftCategory] = useState('');
   const [importing, setImporting] = useState(false);
-  const filtered = questions.filter((item) => (!search || item.text.includes(search)) && (!category || item.category === category));
-  const categories = [...new Set(questions.map((item) => item.category).filter(Boolean))];
+  const filtered = questions.filter((item) => !search || item.text.includes(search));
   const importQuestions = async (event) => {
     event.preventDefault();
     const texts = draft.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
     if (!texts.length) return;
     setImporting(true);
-    try { await onReload({ texts, category: draftCategory }); setDraft(''); } finally { setImporting(false); }
+    try { await onReload({ texts }); setDraft(''); } finally { setImporting(false); }
   };
   const toggle = async (item) => { await api.updateQuestion(item.id, { enabled: !item.enabled }); onReload(); };
   return <>
     <PageHeader eyebrow="MONITOR QUESTIONS" title="监控问题" description="问题是品牌监测的样本资产，建议优先使用真实用户问法。" actions={<button className="button primary" onClick={onNewRun}>用问题发起监控</button>} />
-    <section className="card import-card"><div className="card-heading"><div><h3>批量添加问题</h3><p>一行一个问题，导入前会自动去重。</p></div><span className="import-count">当前 {questions.length} 条</span></div><form onSubmit={importQuestions} className="import-form"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="例如：第一次买伟哥，哪个牌子更稳一点？\n备孕时老是硬不起来，吃什么药更稳？" /><div className="form-inline"><input value={draftCategory} onChange={(event) => setDraftCategory(event.target.value)} placeholder="分类（可选，例如：购买决策）" /><button className="button primary" disabled={importing || !draft.trim()}>{importing ? '导入中…' : '添加问题'}</button></div></form></section>
-    <section className="card"><div className="filter-bar"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索问题" /><select className="select" value={category} onChange={(event) => setCategory(event.target.value)}><option value="">全部分类</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select><span className="filter-count">显示 {filtered.length} / {questions.length}</span></div><div className="question-list">{filtered.map((item, index) => <div className="question-row" key={item.id}><span className="question-index">{String(index + 1).padStart(2, '0')}</span><div className="question-main"><strong>{item.text}</strong><div><span className="tag">{item.category || '未分类'}</span><small>最近有效率 {formatRate(item.mentionRate)}</small></div></div><span className={`toggle ${item.enabled ? 'on' : ''}`} role="switch" aria-checked={item.enabled} tabIndex="0" onClick={() => toggle(item)} onKeyDown={(event) => event.key === 'Enter' && toggle(item)}>{item.enabled ? '启用' : '停用'}</span></div>)}{!filtered.length && <EmptyState title="没有匹配的问题" description="可以调整筛选条件，或添加一批新的监控问题。" />}</div></section>
+    <section className="card import-card"><div className="card-heading"><div><h3>批量添加问题</h3><p>一行一个问题，导入前会自动去重。</p></div><span className="import-count">当前 {questions.length} 条</span></div><form onSubmit={importQuestions} className="import-form"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="例如：第一次买伟哥，哪个牌子更稳一点？\n备孕时老是硬不起来，吃什么药更稳？" /><div className="form-inline"><button className="button primary" disabled={importing || !draft.trim()}>{importing ? '导入中…' : '添加问题'}</button></div></form></section>
+    <section className="card"><div className="filter-bar"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索问题" /><span className="filter-count">显示 {filtered.length} / {questions.length}</span></div><div className="question-list">{filtered.map((item, index) => <div className="question-row" key={item.id}><span className="question-index">{String(index + 1).padStart(2, '0')}</span><div className="question-main"><strong>{item.text}</strong>{item.mentionRate === null || item.mentionRate === undefined ? null : <div><small>近 30 天出现率 {formatRate(item.mentionRate)}</small></div>}</div><span className={`toggle ${item.enabled ? 'on' : ''}`} role="switch" aria-checked={item.enabled} tabIndex="0" onClick={() => toggle(item)} onKeyDown={(event) => event.key === 'Enter' && toggle(item)}>{item.enabled ? '启用' : '停用'}</span></div>)}{!filtered.length && <EmptyState title="没有匹配的问题" description="可以调整筛选条件，或添加一批新的监控问题。" />}</div></section>
   </>;
 }
 
@@ -150,7 +216,7 @@ function RunDetail({ run, onSelectCell, onCancel }) {
     for (const item of run.platformRuns || []) { if (!map.has(item.promptId)) map.set(item.promptId, { id: item.promptId, prompt: item.prompt, cells: {} }); map.get(item.promptId).cells[item.platformId] = item; }
     return [...map.values()];
   }, [run]);
-  return <section className="card run-detail"><div className="detail-header"><div><div className="page-eyebrow">TASK DETAIL</div><h3>{formatTime(run.createdAt)} 的监控任务</h3><p>{run.completedChecks}/{run.totalChecks} 检查完成 · {run.mentionedChecks} 个回答提到品牌 · {run.citationCount} 条引用</p></div><div className="detail-actions"><StatusPill status={displayRunStatus(run)} />{['queued', 'running'].includes(run.status) && <button className="button danger-outline" onClick={() => onCancel(run.id)}>{run.cancelRequestedAt ? '取消中…' : '取消任务'}</button>}</div></div><div className="detail-progress"><div className="progress-line large"><span style={{ width: `${progressPercent(run)}%` }} /></div><span>{progressPercent(run)}%</span></div><div className="matrix-wrap"><table className="matrix"><thead><tr><th>监控问题</th>{run.targetPlatforms.map((id) => <th key={id}><PlatformBadge id={id} /></th>)}</tr></thead><tbody>{grouped.map((row) => <tr key={row.id}><td><strong>{row.prompt?.text || '未知问题'}</strong><small>{row.prompt?.category || '未分类'}</small></td>{run.targetPlatforms.map((id) => <td key={id}><button className={`matrix-cell ${row.cells[id]?.status || 'queued'}`} onClick={() => row.cells[id] && onSelectCell(row.cells[id])}>{row.cells[id] ? <><StatusPill status={row.cells[id].status} />{row.cells[id].answer ? <span className={row.cells[id].answer.brandMentioned ? 'mention yes' : 'mention'}>{row.cells[id].answer.brandMentioned ? '已提及' : '未提及'}</span> : null}<small>{row.cells[id].answer ? `${row.cells[id].answer.citations.length} 条来源` : row.cells[id].errorMessage || '等待执行'}</small></> : <span>—</span>}</button></td>)}</tr>)}</tbody></table></div></section>;
+  return <section className="card run-detail"><div className="detail-header"><div><div className="page-eyebrow">TASK DETAIL</div><h3>{formatTime(run.createdAt)} 的监控任务</h3><p>{run.completedChecks}/{run.totalChecks} 检查完成 · {run.mentionedChecks} 个回答提到品牌 · {run.citationCount} 条引用</p></div><div className="detail-actions"><StatusPill status={displayRunStatus(run)} />{['queued', 'running'].includes(run.status) && <button className="button danger-outline" onClick={() => onCancel(run.id)}>{run.cancelRequestedAt ? '取消中…' : '取消任务'}</button>}</div></div><div className="detail-progress"><div className="progress-line large"><span style={{ width: `${progressPercent(run)}%` }} /></div><span>{progressPercent(run)}%</span></div><div className="matrix-wrap"><table className="matrix"><thead><tr><th>监控问题</th>{run.targetPlatforms.map((id) => <th key={id}><PlatformBadge id={id} /></th>)}</tr></thead><tbody>{grouped.map((row) => <tr key={row.id}><td><strong>{row.prompt?.text || '未知问题'}</strong></td>{run.targetPlatforms.map((id) => <td key={id}><button className={`matrix-cell ${row.cells[id]?.status || 'queued'}`} onClick={() => row.cells[id] && onSelectCell(row.cells[id])}>{row.cells[id] ? <><StatusPill status={row.cells[id].status} />{row.cells[id].answer ? <span className={row.cells[id].answer.brandMentioned ? 'mention yes' : 'mention'}>{row.cells[id].answer.brandMentioned ? '已提及' : '未提及'}</span> : null}<small>{row.cells[id].answer ? `${row.cells[id].answer.citations.length} 条来源` : row.cells[id].errorMessage || '等待执行'}</small></> : <span>—</span>}</button></td>)}</tr>)}</tbody></table></div></section>;
 }
 
 function SourcesPage({ sources, onReload }) {
@@ -182,6 +248,7 @@ const PROFILE_HEALTH = {
 };
 
 const LOGIN_STATE_LABELS = {
+  none: '无登录账号',
   unknown: '登录状态待手动验证',
   ready: '已有可用登录态',
   restricted: '登录态受限，需要处理',
@@ -300,12 +367,12 @@ function PlatformsPage({ platforms }) {
       <aside className="card platform-side">
         <div className="platform-side-title">平台</div>
         <div className="platform-side-list">
-          <button className={`platform-side-item ${showAll ? 'active' : ''}`} onClick={() => setSelectedPlatformId(ALL_PLATFORMS)}><span className="platform-side-all">全部</span><span className="platform-side-name">全部平台</span><span className="platform-side-count">{profiles.length ? `${readyAll}/${profiles.length}` : '未配置'}</span></button>
+          <button className={`platform-side-item ${showAll ? 'active' : ''}`} onClick={() => setSelectedPlatformId(ALL_PLATFORMS)}><span className="platform-side-all">全部</span><span className="platform-side-name">全部平台</span><span className="platform-side-count">{profiles.length ? `${readyAll}/${profiles.length}` : '无'}</span></button>
           <div className="platform-side-divider">按平台</div>
           {platforms.map((item) => {
           const count = profiles.filter((profile) => profile.platformId === item.id).length;
           const ready = profiles.filter((profile) => profile.platformId === item.id && profile.health === 'ready').length;
-          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span><span className="platform-side-count">{count ? `${ready}/${count}` : '未配置'}</span></button>;
+          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span><span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
         })}</div>
       </aside>
       {showAll || selected ? <section className="card platform-detail">
@@ -329,7 +396,7 @@ function PlatformsPage({ platforms }) {
               <div className="account-actions"><button className="text-button" disabled={running} onClick={() => login(profile).catch(() => undefined)}>{running ? '登录中…' : profile.health === 'ready' ? '重新登录' : '登录'}</button>{profile.health !== 'disabled' ? <button className="text-button danger" onClick={() => disable(profile.id).catch(() => undefined)}>停用</button> : null}</div>
             </div>;
           })}
-          {!own.length ? <div className="account-empty">{showAll ? '还没有任何登录态，点击右上角「添加账号」开始配置。' : '该平台还没有账号，点击右上角「添加账号」开始配置登录态。'}</div> : null}
+          {!own.length ? <div className="account-empty">{showAll ? '无登录账号，点击右上角「添加账号」开始配置。' : '无登录账号，点击右上角「添加账号」开始配置。'}</div> : null}
         </div>
       </section> : null}
     </div>
@@ -458,7 +525,7 @@ function RunWizard({ brand, questions, platforms, onClose, onCreated }) {
                   <span className="rw-platform-name">{item.label || platformLabel(item.id)}</span>
                 </label>
                 {on ? <>
-                  <span className={`rw-chip ${ready ? 'ok' : 'warn'}`}>{total ? `${ready}/${total} 登录态可用` : '未配置登录态'}</span>
+                  <span className={`rw-chip ${ready ? 'ok' : 'warn'}`}>{total ? `${ready}/${total} 登录态可用` : '无登录账号'}</span>
                   <div className="rw-segment">
                     <button type="button" className={current === 'headless' ? 'active' : ''} onClick={() => setMode(item.id, 'headless')}>无头</button>
                     <button type="button" className={current === 'headed' ? 'active' : ''} onClick={() => setMode(item.id, 'headed')}>有头</button>

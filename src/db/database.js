@@ -135,6 +135,7 @@ const SCHEMA = `
   -- 避免继续硬刷把账号搞进风控（DeepSeek 就是这样被禁言的）。
   CREATE TABLE IF NOT EXISTS platform_cooldowns (
     platform_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL DEFAULT 'challenge',
     cooldown_until TEXT,
     reason TEXT NOT NULL DEFAULT '',
     strike_count INTEGER NOT NULL DEFAULT 0,
@@ -183,6 +184,7 @@ export function openDatabase(databasePath) {
   ensureColumn(database, 'projects', 'website', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, 'projects', 'owned_domains_json', "TEXT NOT NULL DEFAULT '[]'");
   dropColumn(database, 'prompts', 'category');
+  ensureColumn(database, 'platform_cooldowns', 'kind', "TEXT NOT NULL DEFAULT 'challenge'");
   ensureColumn(database, 'platform_runs', 'mode', "TEXT NOT NULL DEFAULT 'headless'");
   ensureColumn(database, 'runs', 'concurrency', 'INTEGER NOT NULL DEFAULT 3');
   ensureColumn(database, 'runs', 'append_search_prompt', 'INTEGER NOT NULL DEFAULT 0');

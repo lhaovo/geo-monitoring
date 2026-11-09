@@ -160,6 +160,7 @@ input:focus, textarea:focus, .select:focus { border-color: #7e96ff; box-shadow: 
 .platform-detail-meta dd { overflow: hidden; margin: 0; color: #53627b; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .platform-cooldown-list { display: grid; gap: 10px; margin-top: 16px; }
 .platform-side-paused { padding: 1px 6px; border-radius: 999px; background: #fff1dc; color: #b0722a; font-size: 9px; font-weight: 700; }
+.platform-side-paused.busy { background: #e8f0ff; color: #3f5ea8; }
 .platform-cooldown-notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 16px; padding: 12px 14px; border: 1px solid #f5d9a8; border-radius: 12px; background: linear-gradient(135deg, #fff8ec, #fffdf8); }
 .platform-cooldown-notice div { display: grid; gap: 4px; min-width: 0; }
 .platform-cooldown-notice strong { color: #a35a12; font-size: 12px; }

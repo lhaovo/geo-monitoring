@@ -75,6 +75,9 @@ const CHALLENGE_SELECTORS = [
   'iframe[src*=geetest]:visible',
 ];
 
+// 平台繁忙 / 排队提示。与验证码不同：人工过不了（非会员进不了优先队列），
+// 只能等平台负载降下来，所以要单独识别、单独处理。
+const BUSY_TEXT_PATTERN = /(?:和Kimi聊天的人太多了|进入优先队列|当前访问人数较多|访问人数过多|服务繁忙|系统繁忙|繁忙中|正在排队|排队人数)/u;
 const LOGIN_TEXT_PATTERN = /^(?:登录|立即登录|手机号登录|手机号码登录|验证码登录|短信登录|密码登录|账号密码登录|扫码登录|登录\/注册)$/u;
 const CHALLENGE_TEXT_PATTERN = /(?:请完成安全验证|拖动滑块|滑到最右|完成拼图|验证码校验|请按住滑块|拖动到最右边|请拖动下方滑块完成验证|通过验证以确保正常访问|向右滑动|向右拖动滑块|点击图中最小的|请依次点击图中)/u;
 const LOGIN_ERROR_PATTERN = /(?:账号或密码错误|账号密码错误|用户名或密码错误|密码错误|验证码错误|验证码不正确|验证码无效|无效的验证码|验证码已失效|验证码已过期|验证码格式|手机号格式不正确|请输入正确的手机号|登录失败|登录异常)/u;
@@ -220,6 +223,9 @@ export async function probeLoginState(page, { loginPromptSelectors = [], loginPr
   const smsCodeInput = await firstVisibleAcrossFrames(page, SMS_CODE_INPUT_SELECTORS);
   if (challengeWidget && !smsCodeInput) return { status: 'challenge', reason: 'human_challenge' };
 
+  const busyText = await firstVisibleMatchingTextAcrossFrames(page, BUSY_TEXT_PATTERN);
+  if (busyText) return { status: 'busy', reason: 'platform_busy', message: (await busyText.innerText().catch(() => '')).trim() || '平台当前繁忙，请稍后重试。' };
+
   const loginPrompt = await firstVisibleAcrossFrames(page, [...LOGIN_PROMPT_SELECTORS, ...loginPromptSelectors])
     ?? await firstVisibleMatchingTextAcrossFrames(page, LOGIN_TEXT_PATTERN)
     ?? (loginPromptTextPattern ? await firstVisibleMatchingTextAcrossFrames(page, loginPromptTextPattern) : null);
@@ -291,6 +297,13 @@ export async function guardAgainstInterruption(page, loginState, {
   if (state.status === 'unauthenticated') {
     const error = new Error('登录状态已失效，请重新登录该账号后再执行监控。');
     error.code = 'login_required';
+    error.loginState = state;
+    throw error;
+  }
+  if (state.status === 'busy') {
+    // 繁忙是平台负载问题，人工过不了也不该重试，交给上层让平台冷却。
+    const error = new Error(state.message ?? '平台当前繁忙，请稍后重试。');
+    error.code = 'platform_busy';
     error.loginState = state;
     throw error;
   }

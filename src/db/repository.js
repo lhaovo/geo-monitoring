@@ -787,6 +787,7 @@ export class GeoRepository {
     const cooldownUntil = row.cooldown_until ?? null;
     return {
       platformId: row.platform_id,
+      kind: row.kind ?? 'challenge',
       cooldownUntil,
       reason: row.reason ?? '',
       strikeCount: Number(row.strike_count ?? 0),
@@ -798,23 +799,36 @@ export class GeoRepository {
   // 记录一次验证码拦截。连续命中达到阈值时给平台加冷却，
   // 冷却结束后重新计数；已经处于冷却中时不重复累计。
   recordPlatformChallenge(platformId, { threshold = 3, cooldownMs = 30 * 60_000, reason = '' } = {}) {
+    return this.recordPlatformStrike(platformId, { kind: 'challenge', threshold, cooldownMs, reason });
+  }
+
+  // 平台繁忙（排队）同样需要熔断：繁忙时提交的问题不会得到回答，
+  // 继续跑只会白白消耗配额并骚扰平台。
+  recordPlatformBusy(platformId, { threshold = 1, cooldownMs = 10 * 60_000, reason = '' } = {}) {
+    return this.recordPlatformStrike(platformId, { kind: 'busy', threshold, cooldownMs, reason });
+  }
+
+  // 记录一次平台级熔断。验证码与繁忙是两个维度，各自独立计数：
+  // 切换维度时重新开始累计，冷却期间不再累加。
+  recordPlatformStrike(platformId, { kind = 'challenge', threshold = 3, cooldownMs = 30 * 60_000, reason = '' } = {}) {
     const timestamp = now();
     const current = this.getPlatformCooldown(platformId);
     if (current?.coolingDown) return { ...current, coolingDown: true };
-    const strikeCount = (current?.strikeCount ?? 0) + 1;
+    const sameKind = current?.kind === kind;
+    const strikeCount = sameKind ? (current?.strikeCount ?? 0) + 1 : 1;
     if (strikeCount < threshold) {
-      this.database.prepare(`INSERT INTO platform_cooldowns (platform_id, cooldown_until, reason, strike_count, updated_at)
-        VALUES (?, NULL, ?, ?, ?) ON CONFLICT(platform_id) DO UPDATE SET reason = excluded.reason,
+      this.database.prepare(`INSERT INTO platform_cooldowns (platform_id, kind, cooldown_until, reason, strike_count, updated_at)
+        VALUES (?, ?, NULL, ?, ?, ?) ON CONFLICT(platform_id) DO UPDATE SET kind = excluded.kind, reason = excluded.reason,
         strike_count = excluded.strike_count, updated_at = excluded.updated_at`)
-        .run(platformId, reason, strikeCount, timestamp);
-      return { platformId, cooldownUntil: null, reason, strikeCount, coolingDown: false, updatedAt: timestamp };
+        .run(platformId, kind, reason, strikeCount, timestamp);
+      return { platformId, kind, cooldownUntil: null, reason, strikeCount, coolingDown: false, updatedAt: timestamp };
     }
     const cooldownUntil = new Date(Date.now() + cooldownMs).toISOString();
-    this.database.prepare(`INSERT INTO platform_cooldowns (platform_id, cooldown_until, reason, strike_count, updated_at)
-      VALUES (?, ?, ?, 0, ?) ON CONFLICT(platform_id) DO UPDATE SET cooldown_until = excluded.cooldown_until,
+    this.database.prepare(`INSERT INTO platform_cooldowns (platform_id, kind, cooldown_until, reason, strike_count, updated_at)
+      VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(platform_id) DO UPDATE SET kind = excluded.kind, cooldown_until = excluded.cooldown_until,
       reason = excluded.reason, strike_count = 0, updated_at = excluded.updated_at`)
-      .run(platformId, cooldownUntil, reason, timestamp);
-    return { platformId, cooldownUntil, reason, strikeCount: 0, coolingDown: true, updatedAt: timestamp };
+      .run(platformId, kind, cooldownUntil, reason, timestamp);
+    return { platformId, kind, cooldownUntil, reason, strikeCount: 0, coolingDown: true, updatedAt: timestamp };
   }
 
   // 手动解除平台冷却。

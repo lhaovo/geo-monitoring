@@ -86,6 +86,68 @@ test('识别网易易盾空间点选验证码', async () => {
   });
 });
 
+// Kimi 繁忙时弹的排队提示：非会员进不了优先队列，回答不会生成。
+const KIMI_BUSY_HTML = `<!doctype html><html><body>
+  <div class="modal-mask" style="z-index:30">
+    <div class="modal-container" data-testid="confirm-dialog">
+      <div class="header"><div class="title">提示</div></div>
+      <div class="body">和Kimi聊天的人太多了，订阅会员可进入优先队列</div>
+      <div class="bottom"><button>我知道了</button><button>去升级</button></div>
+    </div>
+  </div>
+  <textarea></textarea>
+</body></html>`;
+
+test('识别 Kimi 繁忙排队提示', async () => {
+  await withPage(KIMI_BUSY_HTML, async (page) => {
+    const state = await probeLoginState(page, {});
+    assert.equal(state.status, 'busy');
+    assert.equal(state.reason, 'platform_busy');
+    assert.ok(state.message.includes('优先队列'));
+  });
+});
+
+test('繁忙按终态失败处理，不重试也不改动账号状态', async () => {
+  await withRepository(async (repository) => {
+    const { run, profile } = await seedRun(repository, { platformId: 'kimi' });
+    const worker = new RunWorker({ repository, paths: {} });
+    try {
+      const queue = createWorkQueue({ repository });
+      const platformRun = queue.claimNext(run.id, 'kimi', { leaseId: 'lease-1' });
+      repository.assignPlatformRunProfile(platformRun.id, profile.profileId);
+
+      const error = new Error('和Kimi聊天的人太多了，订阅会员可进入优先队列');
+      error.code = 'platform_busy';
+      worker.handlePlatformRunFailure(run.id, { ...platformRun, profileId: profile.profileId }, 'lease-1', error);
+
+      const detail = repository.getRunDetail(run.id);
+      assert.equal(detail.platformRuns[0].status, 'failed');
+      assert.equal(repository.getProfile(profile.id).health, 'ready');
+
+      const cooldown = repository.getPlatformCooldown('kimi');
+      assert.equal(cooldown.kind, 'busy');
+      assert.equal(cooldown.coolingDown, true);
+    } finally {
+      await worker.stop();
+    }
+  });
+});
+
+test('繁忙与验证码各自独立计数', async () => {
+  await withRepository(async (repository) => {
+    repository.recordPlatformChallenge('qwen', { threshold: 3, cooldownMs: 60_000, reason: '验证码' });
+    repository.recordPlatformChallenge('qwen', { threshold: 3, cooldownMs: 60_000, reason: '验证码' });
+    assert.equal(repository.getPlatformCooldown('qwen').strikeCount, 2);
+
+    // 切到繁忙维度时重新计数，不与验证码累加；繁忙第一次就进入冷却。
+    const busy = repository.recordPlatformBusy('qwen', { cooldownMs: 60_000, reason: '繁忙' });
+    assert.equal(busy.kind, 'busy');
+    assert.equal(busy.coolingDown, true);
+    assert.equal(busy.strikeCount, 0);
+    assert.equal(repository.getPlatformCooldown('qwen').kind, 'busy');
+  });
+});
+
 test('没有验证码时不会误判', async () => {
   await withPage('<!doctype html><html><body><textarea></textarea></body></html>', async (page) => {
     const state = await probeLoginState(page, {});

@@ -76,7 +76,7 @@ export function buildServer({
       defaultMode: platform.defaultMode ?? (platform.id === 'doubao' ? 'headed' : 'headless'),
       loginStatus: profiles.length === 0 ? 'none' : healthy > 0 ? 'ready' : restricted > 0 ? 'restricted' : 'unknown',
       cooldown: cooldown?.coolingDown
-        ? { until: cooldown.cooldownUntil, reason: cooldown.reason }
+        ? { until: cooldown.cooldownUntil, reason: cooldown.reason, kind: cooldown.kind }
         : null,
       riskLevel: platform.id === 'doubao' ? 'elevated' : 'normal',
       profiles,

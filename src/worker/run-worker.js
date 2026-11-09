@@ -7,6 +7,8 @@ import { createId } from '../shared/ids.js';
 // 平台级验证码熔断：连续命中多少次后让平台冷却，以及冷却多久。
 export const DEFAULT_CHALLENGE_THRESHOLD = 3;
 export const DEFAULT_CHALLENGE_COOLDOWN_MS = 30 * 60_000;
+// 平台繁忙时提交的问题不会得到回答，第一次就该让平台歇一会儿。
+export const DEFAULT_BUSY_COOLDOWN_MS = 10 * 60_000;
 
 // 每个平台是一条独立的共享队列，Worker 动态从中领取任务：
 // - 全局并发上限由 run.concurrency 控制（1–6）
@@ -270,6 +272,29 @@ export class RunWorker extends EventEmitter {
       } else {
         this.emitEvent({ runId, platformRunId: platformRun.id, level: 'error', message: `${platformRun.platformId} 遇到验证码（累计 ${cooldown.strikeCount} 次），本次未继续执行：${error.message}` });
       }
+      return;
+    }
+
+    if (error?.code === 'platform_busy') {
+      // 平台繁忙（排队）时人工也解决不了，重试只会白白消耗配额，
+      // 因此直接结束该问题并让平台冷却一段时间。
+      this.repository.failPlatformRun(platformRun.id, error.message);
+      const cooldown = this.repository.recordPlatformBusy(platformRun.platformId, {
+        cooldownMs: DEFAULT_BUSY_COOLDOWN_MS,
+        reason: error.message,
+      });
+      const profileId = platformRun.profileId;
+      if (profileId) {
+        this.repository.updateProfileByBinding(platformRun.platformId, profileId, { lastError: error.message });
+      }
+      this.emitEvent({
+        runId,
+        platformRunId: platformRun.id,
+        level: 'error',
+        message: cooldown.coolingDown
+          ? `${platformRun.platformId} 当前繁忙，已暂停该平台至 ${cooldown.cooldownUntil}：${error.message}`
+          : `${platformRun.platformId} 当前繁忙（累计 ${cooldown.strikeCount} 次），本次未继续执行：${error.message}`,
+      });
       return;
     }
 

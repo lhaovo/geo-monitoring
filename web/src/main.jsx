@@ -392,7 +392,7 @@ function PlatformsPage({ platforms }) {
           {platforms.map((item) => {
           const count = profiles.filter((profile) => profile.platformId === item.id).length;
           const ready = profiles.filter((profile) => profile.platformId === item.id && profile.health === 'ready').length;
-          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span>{cooldowns[item.id] ? <span className="platform-side-paused">暂停</span> : null}<span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
+          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span>{cooldowns[item.id] ? <span className={`platform-side-paused ${cooldowns[item.id].kind === 'busy' ? 'busy' : ''}`}>{cooldowns[item.id].kind === 'busy' ? '繁忙' : '暂停'}</span> : null}<span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
         })}</div>
       </aside>
       {showAll || selected ? <section className="card platform-detail">
@@ -404,14 +404,14 @@ function PlatformsPage({ platforms }) {
           ? (platforms.some((item) => cooldowns[item.id])
             ? <div className="platform-cooldown-list">
             {platforms.filter((item) => cooldowns[item.id]).map((item) => <div key={item.id} className="platform-cooldown-notice">
-              <div><strong>{item.label} 已因连续遇到验证码暂停</strong><span>暂停至 {formatTime(cooldowns[item.id]?.until)}　·　{cooldowns[item.id]?.reason}</span></div>
+              <div><strong>{item.label} {cooldowns[item.id]?.kind === 'busy' ? '当前繁忙，已暂停采集' : '已因连续遇到验证码暂停'}</strong><span>暂停至 {formatTime(cooldowns[item.id]?.until)}　·　{cooldowns[item.id]?.reason}</span></div>
               <button className="button secondary" onClick={() => clearCooldown(item.id).catch(() => undefined)}>立即恢复</button>
             </div>)}
           </div>
             : null)
           : cooldown
             ? <div className="platform-cooldown-notice">
-              <div><strong>该平台已因连续遇到验证码暂停</strong><span>暂停至 {formatTime(cooldown.until)}　·　{cooldown.reason}</span></div>
+              <div><strong>{cooldown.kind === 'busy' ? '该平台当前繁忙，已暂停采集' : '该平台已因连续遇到验证码暂停'}</strong><span>暂停至 {formatTime(cooldown.until)}　·　{cooldown.reason}</span></div>
               <button className="button secondary" onClick={() => clearCooldown(selected.id).catch(() => undefined)}>立即恢复</button>
             </div>
             : null}

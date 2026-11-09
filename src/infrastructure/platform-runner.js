@@ -22,10 +22,15 @@ function throwIfAborted(signal) {
 async function capturePage(page, directory, name) {
   const screenshotPath = path.join(directory, `${name}.png`);
   const htmlPath = path.join(directory, `${name}.html`);
-  await Promise.all([
-    page.screenshot({ path: screenshotPath, fullPage: true }),
-    writeFile(htmlPath, await page.content(), 'utf8'),
-  ]);
+  // 截图与页面内容并行采集。浏览器上下文可能在采集过程中被关闭（例如取消任务时），
+  // 此时两个 Promise 都会 reject。必须先挂好兜底处理器再等待结果，
+  // 否则先失败的那个会让另一个变成「无人接管的 rejection」，
+  // Node 会以未捕获异常直接退出，整个监控服务随之崩溃。
+  const screenshot = page.screenshot({ path: screenshotPath, fullPage: true });
+  const html = page.content().then((content) => writeFile(htmlPath, content, 'utf8'));
+  const settled = await Promise.allSettled([screenshot, html]);
+  const failure = settled.find((result) => result.status === 'rejected');
+  if (failure) throw failure.reason;
   return { screenshotPath, htmlPath };
 }
 

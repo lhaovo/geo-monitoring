@@ -64,10 +64,19 @@ const CHALLENGE_SELECTORS = [
   '[class*=nc-container]:visible',
   '[class*=nc_wrapper]:visible',
   '[class*=aliyun-captcha]:visible',
+  // 网易易盾的空间点选验证码（DeepSeek 用的是这种）：
+  // 弹窗挂在 ds-modal 里，类名带 shumei / captcha。
+  '.ds-shumei-captcha-modal:visible',
+  '[class*=shumei-captcha]:visible',
+  '[class*=shumei_captcha]:visible',
+  '[id^=sm-captcha]:visible',
+  // 极验（Geetest）滑动 / 点选验证码
+  '[class*=geetest]:visible',
+  'iframe[src*=geetest]:visible',
 ];
 
 const LOGIN_TEXT_PATTERN = /^(?:登录|立即登录|手机号登录|手机号码登录|验证码登录|短信登录|密码登录|账号密码登录|扫码登录|登录\/注册)$/u;
-const CHALLENGE_TEXT_PATTERN = /(?:请完成安全验证|拖动滑块|滑到最右|完成拼图|验证码校验|请按住滑块|拖动到最右边|请拖动下方滑块完成验证|通过验证以确保正常访问|向右滑动|向右拖动滑块)/u;
+const CHALLENGE_TEXT_PATTERN = /(?:请完成安全验证|拖动滑块|滑到最右|完成拼图|验证码校验|请按住滑块|拖动到最右边|请拖动下方滑块完成验证|通过验证以确保正常访问|向右滑动|向右拖动滑块|点击图中最小的|请依次点击图中)/u;
 const LOGIN_ERROR_PATTERN = /(?:账号或密码错误|账号密码错误|用户名或密码错误|密码错误|验证码错误|验证码不正确|验证码无效|无效的验证码|验证码已失效|验证码已过期|验证码格式|手机号格式不正确|请输入正确的手机号|登录失败|登录异常)/u;
 const LOGIN_INPUT_PATTERN = /(?:手机号|手机号码|验证码|密码|账号|帐号|邮箱|phone|mobile|password|passcode|verification|one[- ]?time)/iu;
 const ACCOUNT_RESTRICTION_PATTERN = /(?:\u8fdd\u53cd\u7528\u6237\u4f7f\u7528\u89c4\u8303|(?:\u8d26\u53f7|\u8d26\u6237|\u5e10\u53f7)[^\u3002\uff01\uff1f!?\n]{0,32}(?:\u7981\u8a00|\u5c01\u7981|\u9650\u5236|\u7981\u6b62\u4f7f\u7528|\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528)|(?:\u4f60|\u60a8)(?:\u5df2|\u88ab)[^\u3002\uff01\uff1f!?\n]{0,12}(?:\u7981\u6b62\u4f7f\u7528|\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528))/u;

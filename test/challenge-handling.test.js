@@ -61,6 +61,31 @@ test('识别阿里滑块文案', async () => {
   });
 });
 
+// DeepSeek 用的网易易盾空间点选验证码：提交问题之后才弹出。
+const SHUMEI_HTML = `<!doctype html><html><body>
+  <div class="ds-modal-overlay" style="z-index:1024"></div>
+  <div class="ds-theme ds-modal-wrapper" style="z-index:1025;">
+    <div class="ds-modal" aria-modal="true">
+      <div class="ds-modal-content ds-elevated ds-shumei-captcha-modal" role="dialog">
+        <div class="ds-modal-content__main ds-shumei-captcha-main">
+          <div class="ds-shumei-captcha-content">
+            <div class="shumei_captcha shumei_captcha_wrapper product-embed mode-spatial_select">
+              <div class="shumei_captcha_slide_tips">点击图中最小的蓝色圆锥</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body></html>`;
+
+test('识别网易易盾空间点选验证码', async () => {
+  await withPage(SHUMEI_HTML, async (page) => {
+    const state = await probeLoginState(page, {});
+    assert.equal(state.status, 'challenge');
+  });
+});
+
 test('没有验证码时不会误判', async () => {
   await withPage('<!doctype html><html><body><textarea></textarea></body></html>', async (page) => {
     const state = await probeLoginState(page, {});

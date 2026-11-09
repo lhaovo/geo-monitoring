@@ -831,6 +831,38 @@ export class GeoRepository {
     return { platformId, kind, cooldownUntil, reason, strikeCount: 0, coolingDown: true, updatedAt: timestamp };
   }
 
+  // ---- 平台人工窗口 ----
+
+  // 打开人工窗口：某平台刚要求过验证码，接下来这段时间直接用有头模式跑，
+  // 避免无头失败后再重跑导致同一条问题提交两次。
+  openPlatformManualWindow(platformId, { durationMs = 30 * 60_000, reason = '' } = {}) {
+    const timestamp = now();
+    const until = new Date(Date.now() + durationMs).toISOString();
+    this.database.prepare(`INSERT INTO platform_manual_windows (platform_id, until, reason, updated_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(platform_id) DO UPDATE SET until = excluded.until,
+      reason = excluded.reason, updated_at = excluded.updated_at`)
+      .run(platformId, until, reason, timestamp);
+    return this.getPlatformManualWindow(platformId);
+  }
+
+  // 读取人工窗口。窗口只影响浏览器模式，不会暂停平台调度。
+  getPlatformManualWindow(platformId) {
+    const row = this.database.prepare('SELECT * FROM platform_manual_windows WHERE platform_id = ?').get(platformId);
+    if (!row) return null;
+    return {
+      platformId: row.platform_id,
+      until: row.until,
+      reason: row.reason ?? '',
+      active: Boolean(row.until && Date.parse(row.until) > Date.now()),
+      updatedAt: row.updated_at,
+    };
+  }
+
+  clearPlatformManualWindow(platformId) {
+    this.database.prepare('DELETE FROM platform_manual_windows WHERE platform_id = ?').run(platformId);
+    return this.getPlatformManualWindow(platformId);
+  }
+
   // 手动解除平台冷却。
   clearPlatformCooldown(platformId) {
     this.database.prepare('DELETE FROM platform_cooldowns WHERE platform_id = ?').run(platformId);
@@ -896,6 +928,11 @@ export class GeoRepository {
       lease_id = NULL, lease_expires_at = NULL, error_message = ?
       WHERE platform_id = ? AND profile_id = ? AND status IN ('queued', 'running')`).run(reason, platformId, profileId);
     return result.changes;
+  }
+
+  // 实际执行的浏览器模式可能因为人工窗口而与创建时不同，这里回写真实模式。
+  updatePlatformRunMode(platformRunId, mode) {
+    this.database.prepare('UPDATE platform_runs SET mode = ? WHERE id = ?').run(mode, platformRunId);
   }
 
   assignPlatformRunProfile(platformRunId, profileId) {

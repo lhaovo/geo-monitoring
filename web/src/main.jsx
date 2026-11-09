@@ -279,6 +279,7 @@ function PlatformsPage({ platforms }) {
   const [profiles, setProfiles] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [cooldowns, setCooldowns] = useState({});
+  const [manualWindows, setManualWindows] = useState({});
   const [selectedPlatformId, setSelectedPlatformId] = useState('');
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState('');
@@ -293,6 +294,7 @@ function PlatformsPage({ platforms }) {
     setProfiles(items);
     setSessions(openSessions);
     setCooldowns(Object.fromEntries(status.map((item) => [item.id, item.cooldown ?? null])));
+    setManualWindows(Object.fromEntries(status.map((item) => [item.id, item.manualWindow ?? null])));
   }, []);
 
   useEffect(() => { reload().catch(() => undefined); }, [reload]);
@@ -319,6 +321,7 @@ function PlatformsPage({ platforms }) {
   const own = showAll ? profiles : profiles.filter((profile) => profile.platformId === selected?.id);
   const readyAll = profiles.filter((profile) => profile.health === 'ready').length;
   const cooldown = showAll ? null : (cooldowns[selected?.id] ?? null);
+  const manualWindow = showAll ? null : (manualWindows[selected?.id] ?? null);
 
   const addAccount = async ({ platformId, account, label }) => {
     setError('');
@@ -340,6 +343,19 @@ function PlatformsPage({ platforms }) {
     try {
       const result = await api.startLoginSession({ platformId: profile.platformId, profileId: profile.profileId });
       setMessage(result.session.message);
+      await reload();
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+
+  // 人工窗口期间该平台一直用有头模式跑，操作员可以提前解除、恢复无头。
+  const clearManualWindow = async (platformId) => {
+    setError('');
+    setMessage('');
+    try {
+      await api.clearPlatformManualWindow(platformId);
+      setMessage(`${platformLabel(platformId)} 已解除人工验证模式，后续任务恢复无头执行。`);
       await reload();
     } catch (cause) {
       setError(cause.message);
@@ -392,7 +408,7 @@ function PlatformsPage({ platforms }) {
           {platforms.map((item) => {
           const count = profiles.filter((profile) => profile.platformId === item.id).length;
           const ready = profiles.filter((profile) => profile.platformId === item.id && profile.health === 'ready').length;
-          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span>{cooldowns[item.id] ? <span className={`platform-side-paused ${cooldowns[item.id].kind === 'busy' ? 'busy' : ''}`}>{cooldowns[item.id].kind === 'busy' ? '繁忙' : '暂停'}</span> : null}<span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
+          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span>{manualWindows[item.id] ? <span className="platform-side-paused manual">人工</span> : null}{cooldowns[item.id] ? <span className={`platform-side-paused ${cooldowns[item.id].kind === 'busy' ? 'busy' : ''}`}>{cooldowns[item.id].kind === 'busy' ? '繁忙' : '暂停'}</span> : null}<span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
         })}</div>
       </aside>
       {showAll || selected ? <section className="card platform-detail">
@@ -415,6 +431,12 @@ function PlatformsPage({ platforms }) {
               <button className="button secondary" onClick={() => clearCooldown(selected.id).catch(() => undefined)}>立即恢复</button>
             </div>
             : null}
+        {manualWindow
+          ? <div className="platform-manual-notice">
+            <div><strong>该平台需要人工验证，已自动改用有头模式</strong><span>持续至 {formatTime(manualWindow.until)}　·　遇到验证码时会在浏览器窗口里等待人工处理</span></div>
+            <button className="button secondary" onClick={() => clearManualWindow(selected.id).catch(() => undefined)}>恢复无头</button>
+          </div>
+          : null}
 
         {showAll
           ? <dl className="platform-detail-meta"><div><dt>平台数量</dt><dd>{platforms.length} 个</dd></div><div><dt>账号总数</dt><dd>{own.length} 个</dd></div><div><dt>可用账号</dt><dd>{own.filter((profile) => profile.health === 'ready').length} 个</dd></div><div><dt>受限账号</dt><dd>{own.filter((profile) => profile.health === 'restricted').length} 个</dd></div><div><dt>待登录</dt><dd>{own.filter((profile) => profile.health === 'new' || profile.health === 'expired').length} 个</dd></div><div><dt>已停用</dt><dd>{own.filter((profile) => profile.health === 'disabled').length} 个</dd></div></dl>

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { resolveBrowserExecutable } from '../browser.js';
 import { captureCitations } from '../citations.js';
+import { guardAgainstInterruption } from '../platforms/base.js';
 import { createPlatformRunArtifacts, relativeArtifactPath } from './artifacts.js';
 
 export const SEARCH_PROMPT_SUFFIX = '请先搜索相关信息，参考可靠的公开来源后再回答。';
@@ -51,7 +52,7 @@ export async function captureShareLink(page, adapter, { timeoutMs = 30_000 } = {
   }
 }
 
-export async function executePlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt = false, emit, signal }) {
+export async function executePlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt = false, emit, signal, onManualRequired = null }) {
   throwIfAborted(signal);
   try {
     return await runPlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt, emit, signal });
@@ -60,6 +61,8 @@ export async function executePlatformRun({ platformRun, adapter, paths, mode, ap
     // 关掉无头浏览器、用同一个登录态改用有头模式重跑这条任务。
     if (error?.code !== 'human_challenge' || mode === 'headed') throw error;
     emit(`${adapter.label} 触发验证码，改用有头模式重新打开浏览器，请在窗口中手动完成验证。`);
+    // 通知上层：这段时间该平台直接用有头模式跑，避免每条问题都重复提交两次。
+    onManualRequired?.({ platformId: adapter.id, reason: error.message });
     throwIfAborted(signal);
     let result;
     try {
@@ -125,10 +128,42 @@ async function runPlatformRun({ platformRun, adapter, paths, mode, appendSearchP
         throw error;
       }
       if (loginState?.status === 'challenge') {
-        const error = new Error('平台要求人工完成验证码或安全校验，本次未继续执行。');
-        error.code = 'human_challenge';
-        error.loginState = loginState;
-        throw error;
+        if (mode === 'headed') {
+          // 有头模式：打开页面就要求验证时，等操作员在窗口里过掉再继续，
+          // 不能直接失败——否则人工根本没有操作的机会。
+          emit(`${adapter.label} 打开页面即要求验证，请在浏览器窗口中手动完成验证。`);
+          await guardAgainstInterruption(page, adapter.loginState ?? {}, {
+            mode: 'headed',
+            challengeTimeoutMs: 180_000,
+            onChallenge: (info) => {
+              if (info?.status === 'challenge') {
+                emit(`${adapter.label} 触发验证码，请在浏览器窗口中手动完成验证（最多等待 ${Math.round((info.timeoutMs ?? 0) / 1000)} 秒）。`);
+              } else {
+                emit(`${adapter.label} 验证码已通过，继续执行。`);
+              }
+            },
+          });
+          // 过完验证码后重新确认一次登录态，避免登录已失效还继续往下跑。
+          const after = await adapter.inspectLoginState(page).catch(() => null);
+          if (after?.status === 'unauthenticated') {
+            const error = new Error('登录状态已失效，请重新登录该账号后再执行监控。');
+            error.code = 'login_required';
+            error.loginState = after;
+            throw error;
+          }
+          if (after?.status === 'restricted') {
+            const error = new Error(after.message ?? '账号已被平台限制。');
+            error.code = 'account_restricted';
+            error.restrictedUntil = after.restrictedUntil ?? null;
+            error.restrictionType = after.restrictionType ?? 'restricted';
+            throw error;
+          }
+        } else {
+          const error = new Error('平台要求人工完成验证码或安全校验，本次未继续执行。');
+          error.code = 'human_challenge';
+          error.loginState = loginState;
+          throw error;
+        }
       }
     }
 

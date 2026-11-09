@@ -142,6 +142,15 @@ const SCHEMA = `
     updated_at TEXT NOT NULL
   );
 
+  -- 人工窗口：某平台刚要求过验证码之后，短时间内直接改用有头模式，
+  -- 避免「无头失败 → 有头重跑」把同一条问题重复提交两次、白白消耗平台配额。
+  CREATE TABLE IF NOT EXISTS platform_manual_windows (
+    platform_id TEXT PRIMARY KEY,
+    until TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS task_events (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

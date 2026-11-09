@@ -9,6 +9,9 @@ export const DEFAULT_CHALLENGE_THRESHOLD = 3;
 export const DEFAULT_CHALLENGE_COOLDOWN_MS = 30 * 60_000;
 // 平台繁忙时提交的问题不会得到回答，第一次就该让平台歇一会儿。
 export const DEFAULT_BUSY_COOLDOWN_MS = 10 * 60_000;
+// 撞过验证码之后，该平台在这段时间内直接改用有头模式，
+// 避免每条问题都走「无头失败 → 有头重跑」而重复提交两次。
+export const DEFAULT_MANUAL_WINDOW_MS = 30 * 60_000;
 
 // 每个平台是一条独立的共享队列，Worker 动态从中领取任务：
 // - 全局并发上限由 run.concurrency 控制（1–6）
@@ -205,14 +208,29 @@ export class RunWorker extends EventEmitter {
     this.emitEvent({ runId, platformRunId: platformRun.id, message: `开始执行 ${platformRun.platformId}。` });
     try {
       const adapter = getPlatformAdapter(platformRun.platformId);
+      // 平台处在人工窗口内时直接改用有头模式，避免重复提交同一条问题。
+      const manualWindow = this.repository.getPlatformManualWindow(platformRun.platformId);
+      const mode = manualWindow?.active ? 'headed' : platformRun.mode;
+      if (mode !== platformRun.mode) {
+        this.repository.updatePlatformRunMode(platformRun.id, mode);
+        platformRun = { ...platformRun, mode };
+        this.emitEvent({ runId, platformRunId: platformRun.id, message: `${platformRun.platformId} 需要人工验证，本次自动改用有头模式执行。` });
+      }
       const result = await this.execute({
         platformRun,
         adapter,
         paths: this.paths,
-        mode: platformRun.mode,
+        mode,
         appendSearchPrompt,
         signal: controller.signal,
         emit: (message) => this.emitEvent({ runId, platformRunId: platformRun.id, message }),
+        onManualRequired: ({ platformId, reason }) => {
+          this.repository.openPlatformManualWindow(platformId, {
+            durationMs: DEFAULT_MANUAL_WINDOW_MS,
+            reason: reason ?? '平台要求人工完成验证码。',
+          });
+          this.emitEvent({ runId, platformRunId: platformRun.id, level: 'error', message: `${platformId} 已要求人工验证，接下来 ${Math.round(DEFAULT_MANUAL_WINDOW_MS / 60_000)} 分钟内该平台自动改用有头模式执行。` });
+        },
       });
       if (controller.signal.aborted || this.repository.isCancellationRequested(runId)) {
         this.repository.addArtifacts(platformRun.id, result.artifacts);

@@ -67,6 +67,7 @@ export function buildServer({
   app.get('/api/platforms/status', async () => listPlatformAdapters().map((platform) => {
     const profiles = repo.listProfiles({ platformId: platform.id });
     const cooldown = repo.getPlatformCooldown(platform.id);
+    const manualWindow = repo.getPlatformManualWindow(platform.id);
     const healthy = profiles.filter((profile) => profile.health === 'ready').length;
     const restricted = profiles.filter((profile) => profile.health === 'restricted').length;
     return {
@@ -77,6 +78,9 @@ export function buildServer({
       loginStatus: profiles.length === 0 ? 'none' : healthy > 0 ? 'ready' : restricted > 0 ? 'restricted' : 'unknown',
       cooldown: cooldown?.coolingDown
         ? { until: cooldown.cooldownUntil, reason: cooldown.reason, kind: cooldown.kind }
+        : null,
+      manualWindow: manualWindow?.active
+        ? { until: manualWindow.until, reason: manualWindow.reason }
         : null,
       riskLevel: platform.id === 'doubao' ? 'elevated' : 'normal',
       profiles,
@@ -97,6 +101,14 @@ export function buildServer({
   app.post('/api/platforms/:platformId/cooldown/clear', async (request) => {
     getPlatformAdapter(requireString(request.params.platformId, 'platformId'));
     repo.clearPlatformCooldown(request.params.platformId);
+    return { platformId: request.params.platformId, cleared: true };
+  });
+
+  // 平台处于人工窗口时（刚撞过验证码）会一直用有头模式跑，
+  // 操作员可以提前解除，恢复无头模式。
+  app.post('/api/platforms/:platformId/manual-window/clear', async (request) => {
+    getPlatformAdapter(requireString(request.params.platformId, 'platformId'));
+    repo.clearPlatformManualWindow(request.params.platformId);
     return { platformId: request.params.platformId, cleared: true };
   });
 

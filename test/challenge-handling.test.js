@@ -322,6 +322,75 @@ test('无头撞到验证码时自动改用有头模式重跑同一条任务', as
   }
 });
 
+test('撞过验证码后该平台进入人工窗口，期间自动改用有头模式', async () => {
+  await withRepository(async (repository) => {
+    const { run, profile } = await seedRun(repository, { platformId: 'qwen' });
+    const worker = new RunWorker({ repository, paths: {} });
+    try {
+      const queue = createWorkQueue({ repository });
+      const platformRun = queue.claimNext(run.id, 'qwen', { leaseId: 'lease-1' });
+      repository.assignPlatformRunProfile(platformRun.id, profile.profileId);
+
+      // 模拟执行层报告：这条任务撞到了验证码，需要人工处理。
+      worker.repository.openPlatformManualWindow('qwen', { durationMs: 30 * 60_000, reason: '平台要求人工完成验证码或安全校验，本次未继续执行。' });
+
+      const window = repository.getPlatformManualWindow('qwen');
+      assert.equal(window.active, true);
+      assert.ok(window.until);
+
+      // 窗口到期后自动失效，恢复无头。
+      const expired = repository.openPlatformManualWindow('qwen', { durationMs: -1_000 });
+      assert.equal(expired.active, false);
+    } finally {
+      await worker.stop();
+    }
+  });
+});
+
+test('有头模式打开页面即要求验证时等待人工，而不是直接失败', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'geo-headed-'));
+  const paths = {
+    artifactsDirectory: path.join(directory, 'artifacts'),
+    profilesDirectory: path.join(directory, 'profiles'),
+  };
+  const pageFile = path.join(directory, 'platform.html');
+  await writeFile(pageFile, '<!doctype html><html><body><div>测试平台</div></body></html>', 'utf8');
+
+  let checks = 0;
+  const adapter = {
+    id: 'fake',
+    label: '测试平台',
+    entryUrl: `file://${pageFile.replace(/\\/g, '/')}`,
+    async inspectLoginState() {
+      checks += 1;
+      // 第一次报告验证码；人工处理后恢复正常。
+      return checks === 1
+        ? { status: 'challenge', reason: 'human_challenge' }
+        : { status: 'authenticated', reason: 'chat_input_visible' };
+    },
+    async submitQuestion() {
+      return 'typed';
+    },
+    async waitForAnswer() {
+      return '回答内容';
+    },
+  };
+
+  try {
+    const result = await executePlatformRun({
+      platformRun: { id: 'platform-run-9', runId: 'run-9', prompt: { text: '问题' }, platformId: 'fake', profileId: '13800000000' },
+      adapter,
+      paths,
+      mode: 'headed',
+      emit: () => undefined,
+    });
+    assert.equal(result.content, '回答内容');
+    assert.ok(checks >= 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('平台冷却期间不再领取该平台的任务', async () => {
   await withRepository(async (repository) => {
     const { run } = await seedRun(repository, { prompts: 2 });

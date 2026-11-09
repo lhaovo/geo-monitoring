@@ -1,4 +1,4 @@
-import { createChatPlatformAdapter } from '../base.js';
+import { createChatPlatformAdapter, guardAgainstInterruption } from '../base.js';
 
 const STOP_GENERATION_SELECTOR = '.chat-editor .send-button-container.stop';
 const ASSISTANT_SEGMENT_SELECTOR = '.segment.segment-assistant';
@@ -28,15 +28,32 @@ async function readLatestAnswer(page) {
   return { content: (await response.innerText()).trim(), response, responseCount };
 }
 
-export async function waitForKimiAnswer(page, { timeoutMs = 300_000, stableForMs = 4_000 } = {}) {
+export async function waitForKimiAnswer(page, {
+  timeoutMs = 300_000,
+  stableForMs = 4_000,
+  mode = 'headless',
+  challengeTimeoutMs = 180_000,
+  onChallenge = null,
+  loginState = {},
+} = {}) {
   const deadline = Date.now() + timeoutMs;
   const initial = await readLatestAnswer(page);
   let sawStopGeneration = false;
   let observedSubmittedResponse = false;
   let previous = '';
   let stableSince = null;
+  let lastProbeAt = 0;
 
   while (Date.now() < deadline) {
+    // 验证码与风控提示通常在提交问题之后才出现，等待期间必须持续探测。
+    if (Date.now() - lastProbeAt >= 5_000) {
+      lastProbeAt = Date.now();
+      const interruption = await guardAgainstInterruption(page, loginState, { mode, challengeTimeoutMs, onChallenge });
+      if (interruption?.cleared) {
+        // 人工处理的时间不计入回答超时，给回答重新留出完整的时间窗。
+        deadline = Date.now() + timeoutMs;
+      }
+    }
     const isGenerating = await isVisible(page.locator(STOP_GENERATION_SELECTOR));
     sawStopGeneration ||= isGenerating;
     const { content, response, responseCount } = await readLatestAnswer(page);

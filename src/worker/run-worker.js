@@ -4,6 +4,10 @@ import { getPlatformAdapter } from '../platforms/index.js';
 import { createWorkQueue, DEFAULT_HEARTBEAT_MS, DEFAULT_MAX_ATTEMPTS } from './work-queue.js';
 import { createId } from '../shared/ids.js';
 
+// 平台级验证码熔断：连续命中多少次后让平台冷却，以及冷却多久。
+export const DEFAULT_CHALLENGE_THRESHOLD = 3;
+export const DEFAULT_CHALLENGE_COOLDOWN_MS = 30 * 60_000;
+
 // 每个平台是一条独立的共享队列，Worker 动态从中领取任务：
 // - 全局并发上限由 run.concurrency 控制（1–6）
 // - 同一平台同时只跑一个任务
@@ -124,6 +128,17 @@ export class RunWorker extends EventEmitter {
 
   async consumePlatformQueue({ runId, platformId, appendSearchPrompt, acquire, release }) {
     while (!this.repository.isCancellationRequested(runId)) {
+      // 平台处于验证码冷却期时直接退出该平台的消费循环：
+      // 继续跑只会不断撞风控，把账号也搭进去。
+      const cooldown = this.repository.getPlatformCooldown(platformId);
+      if (cooldown?.coolingDown) {
+        this.emitEvent({
+          runId,
+          level: 'error',
+          message: `${platformId} 连续遇到验证码，已暂停该平台至 ${cooldown.cooldownUntil}，剩余任务请稍后重新发起监测。`,
+        });
+        return;
+      }
       const leaseId = createId();
       const platformRun = this.workQueue.claimNext(runId, platformId, { leaseId });
       if (!platformRun) return;
@@ -237,13 +252,34 @@ export class RunWorker extends EventEmitter {
       return;
     }
 
-    if (error?.code === 'login_required' || error?.code === 'human_challenge') {
-      // 登录态失效或遇到人工校验：重试没有意义，直接结束该问题并更新登录态状态。
+    if (error?.code === 'human_challenge') {
+      // 验证码是平台风控维度的拦截，不一定是账号本身出问题，
+      // 因此不动账号状态，只让当前问题失败并给平台加冷却，避免继续硬刷。
+      this.repository.failPlatformRun(platformRun.id, error.message);
+      const cooldown = this.repository.recordPlatformChallenge(platformRun.platformId, {
+        threshold: DEFAULT_CHALLENGE_THRESHOLD,
+        cooldownMs: DEFAULT_CHALLENGE_COOLDOWN_MS,
+        reason: error.message,
+      });
+      const profileId = platformRun.profileId;
+      if (profileId) {
+        this.repository.updateProfileByBinding(platformRun.platformId, profileId, { lastError: error.message });
+      }
+      if (cooldown.coolingDown) {
+        this.emitEvent({ runId, platformRunId: platformRun.id, level: 'error', message: `${platformRun.platformId} 连续遇到验证码，已暂停该平台至 ${cooldown.cooldownUntil}：${error.message}` });
+      } else {
+        this.emitEvent({ runId, platformRunId: platformRun.id, level: 'error', message: `${platformRun.platformId} 遇到验证码（累计 ${cooldown.strikeCount} 次），本次未继续执行：${error.message}` });
+      }
+      return;
+    }
+
+    if (error?.code === 'login_required') {
+      // 登录态失效：重试没有意义，直接结束该问题并把登录态标记为需要重新登录。
       this.repository.failPlatformRun(platformRun.id, error.message);
       const profileId = platformRun.profileId;
       if (profileId) {
         this.repository.updateProfileByBinding(platformRun.platformId, profileId, {
-          health: error.code === 'login_required' ? 'expired' : 'error',
+          health: 'expired',
           lastError: error.message,
         });
       }

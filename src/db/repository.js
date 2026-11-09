@@ -777,6 +777,52 @@ export class GeoRepository {
       .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)))[0] ?? null;
   }
 
+  // ---- 平台级冷却（验证码风控） ----
+
+  // 读取平台的冷却状态。冷却中的平台不应再被调度，
+  // 否则会持续撞验证码，把账号和整批监测数据一起搭进去。
+  getPlatformCooldown(platformId) {
+    const row = this.database.prepare('SELECT * FROM platform_cooldowns WHERE platform_id = ?').get(platformId);
+    if (!row) return null;
+    const cooldownUntil = row.cooldown_until ?? null;
+    return {
+      platformId: row.platform_id,
+      cooldownUntil,
+      reason: row.reason ?? '',
+      strikeCount: Number(row.strike_count ?? 0),
+      coolingDown: Boolean(cooldownUntil && Date.parse(cooldownUntil) > Date.now()),
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // 记录一次验证码拦截。连续命中达到阈值时给平台加冷却，
+  // 冷却结束后重新计数；已经处于冷却中时不重复累计。
+  recordPlatformChallenge(platformId, { threshold = 3, cooldownMs = 30 * 60_000, reason = '' } = {}) {
+    const timestamp = now();
+    const current = this.getPlatformCooldown(platformId);
+    if (current?.coolingDown) return { ...current, coolingDown: true };
+    const strikeCount = (current?.strikeCount ?? 0) + 1;
+    if (strikeCount < threshold) {
+      this.database.prepare(`INSERT INTO platform_cooldowns (platform_id, cooldown_until, reason, strike_count, updated_at)
+        VALUES (?, NULL, ?, ?, ?) ON CONFLICT(platform_id) DO UPDATE SET reason = excluded.reason,
+        strike_count = excluded.strike_count, updated_at = excluded.updated_at`)
+        .run(platformId, reason, strikeCount, timestamp);
+      return { platformId, cooldownUntil: null, reason, strikeCount, coolingDown: false, updatedAt: timestamp };
+    }
+    const cooldownUntil = new Date(Date.now() + cooldownMs).toISOString();
+    this.database.prepare(`INSERT INTO platform_cooldowns (platform_id, cooldown_until, reason, strike_count, updated_at)
+      VALUES (?, ?, ?, 0, ?) ON CONFLICT(platform_id) DO UPDATE SET cooldown_until = excluded.cooldown_until,
+      reason = excluded.reason, strike_count = 0, updated_at = excluded.updated_at`)
+      .run(platformId, cooldownUntil, reason, timestamp);
+    return { platformId, cooldownUntil, reason, strikeCount: 0, coolingDown: true, updatedAt: timestamp };
+  }
+
+  // 手动解除平台冷却。
+  clearPlatformCooldown(platformId) {
+    this.database.prepare('DELETE FROM platform_cooldowns WHERE platform_id = ?').run(platformId);
+    return this.getPlatformCooldown(platformId);
+  }
+
   // ---- 动态共享队列（租约 / 心跳） ----
 
   claimNextPlatformRun(runId, platformId, { leaseId, leaseExpiresAt }) {

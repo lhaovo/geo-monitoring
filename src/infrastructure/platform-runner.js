@@ -53,6 +53,31 @@ export async function captureShareLink(page, adapter, { timeoutMs = 30_000 } = {
 
 export async function executePlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt = false, emit, signal }) {
   throwIfAborted(signal);
+  try {
+    return await runPlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt, emit, signal });
+  } catch (error) {
+    // 验证码只能在有头模式下人工处理：headless 撞到验证码时，
+    // 关掉无头浏览器、用同一个登录态改用有头模式重跑这条任务。
+    if (error?.code !== 'human_challenge' || mode === 'headed') throw error;
+    emit(`${adapter.label} 触发验证码，改用有头模式重新打开浏览器，请在窗口中手动完成验证。`);
+    throwIfAborted(signal);
+    let result;
+    try {
+      result = await runPlatformRun({ platformRun, adapter, paths, mode: 'headed', appendSearchPrompt, emit, signal, attemptLabel: '-retry' });
+    } catch (retryError) {
+      // 保留第一次尝试的证据，两次尝试的产物合并落库。
+      retryError.artifacts = [...(error.artifacts ?? []), ...(retryError.artifacts ?? [])];
+      throw retryError;
+    }
+    // 有头模式跑成功时，第一次（无头）尝试的证据同样要保留下来。
+    result.artifacts = [...(error.artifacts ?? []), ...(result.artifacts ?? [])];
+    return result;
+  }
+}
+
+// 真正跑一遍平台任务（无头或有头由 mode 决定）。
+async function runPlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt, emit, signal, attemptLabel = '' }) {
+  throwIfAborted(signal);
   const artifacts = await createPlatformRunArtifacts(paths, platformRun.runId, platformRun.id, adapter.id, platformRun.profileId);
   const browserContext = await chromium.launchPersistentContext(artifacts.profileDirectory, {
     executablePath: resolveBrowserExecutable(),
@@ -67,7 +92,8 @@ export async function executePlatformRun({ platformRun, adapter, paths, mode, ap
   const page = browserContext.pages()[0] ?? await browserContext.newPage();
   const savedArtifacts = [];
   const saveSnapshot = async (name) => {
-    const captured = await capturePage(page, artifacts.directory, name);
+    // 重试（有头模式）使用独立文件名，避免覆盖第一次尝试的现场证据。
+    const captured = await capturePage(page, artifacts.directory, `${name}${attemptLabel}`);
     savedArtifacts.push(
       { kind: 'screenshot', relativePath: relativeArtifactPath(paths, captured.screenshotPath) },
       { kind: 'html', relativePath: relativeArtifactPath(paths, captured.htmlPath) },
@@ -111,7 +137,17 @@ export async function executePlatformRun({ platformRun, adapter, paths, mode, ap
     throwIfAborted(signal);
     emit(`问题已提交（${submissionMethod}），等待回答。`);
     await saveSnapshot('02-submitted');
-    const content = await adapter.waitForAnswer(page);
+    const content = await adapter.waitForAnswer(page, {
+      mode,
+      loginState: adapter.loginState ?? {},
+      onChallenge: (info) => {
+        if (info?.status === 'challenge') {
+          emit(`${adapter.label} 触发验证码，请在浏览器窗口中手动完成验证（最多等待 ${Math.round((info.timeoutMs ?? 0) / 1000)} 秒）。`);
+        } else {
+          emit(`${adapter.label} 验证码已通过，继续等待回答。`);
+        }
+      },
+    });
     throwIfAborted(signal);
     await saveSnapshot('03-answer');
     const citationResult = await captureCitations(page, { platformId: adapter.id, runDirectory: artifacts.directory });

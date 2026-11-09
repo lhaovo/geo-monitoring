@@ -278,15 +278,21 @@ function AddAccountModal({ platforms, defaultPlatformId, onClose, onSubmit }) {
 function PlatformsPage({ platforms }) {
   const [profiles, setProfiles] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [cooldowns, setCooldowns] = useState({});
   const [selectedPlatformId, setSelectedPlatformId] = useState('');
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const reload = useCallback(async () => {
-    const [items, openSessions] = await Promise.all([api.listProfiles(), api.listLoginSessions()]);
+    const [items, openSessions, status] = await Promise.all([
+      api.listProfiles(),
+      api.listLoginSessions(),
+      api.listPlatformStatus(),
+    ]);
     setProfiles(items);
     setSessions(openSessions);
+    setCooldowns(Object.fromEntries(status.map((item) => [item.id, item.cooldown ?? null])));
   }, []);
 
   useEffect(() => { reload().catch(() => undefined); }, [reload]);
@@ -312,6 +318,7 @@ function PlatformsPage({ platforms }) {
   const openSessions = sessions.filter((session) => session.status === 'open' || session.status === 'starting');
   const own = showAll ? profiles : profiles.filter((profile) => profile.platformId === selected?.id);
   const readyAll = profiles.filter((profile) => profile.health === 'ready').length;
+  const cooldown = showAll ? null : (cooldowns[selected?.id] ?? null);
 
   const addAccount = async ({ platformId, account, label }) => {
     setError('');
@@ -333,6 +340,19 @@ function PlatformsPage({ platforms }) {
     try {
       const result = await api.startLoginSession({ platformId: profile.platformId, profileId: profile.profileId });
       setMessage(result.session.message);
+      await reload();
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+
+  // 平台因验证码被暂停后，允许操作员立即解除冷却、恢复调度。
+  const clearCooldown = async (platformId) => {
+    setError('');
+    setMessage('');
+    try {
+      await api.clearPlatformCooldown(platformId);
+      setMessage(`${platformLabel(platformId)} 已解除验证码暂停，可以继续发起监测。`);
       await reload();
     } catch (cause) {
       setError(cause.message);
@@ -372,7 +392,7 @@ function PlatformsPage({ platforms }) {
           {platforms.map((item) => {
           const count = profiles.filter((profile) => profile.platformId === item.id).length;
           const ready = profiles.filter((profile) => profile.platformId === item.id && profile.health === 'ready').length;
-          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span><span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
+          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span>{cooldowns[item.id] ? <span className="platform-side-paused">暂停</span> : null}<span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
         })}</div>
       </aside>
       {showAll || selected ? <section className="card platform-detail">
@@ -380,6 +400,22 @@ function PlatformsPage({ platforms }) {
           <div className="platform-detail-title">{showAll ? <span className="platform-side-all">全部</span> : <PlatformDot id={selected.id} />}<h3>{showAll ? '全部平台' : selected.label}</h3>{showAll ? null : <span className={`state-dot ${selected.loginStatus ?? 'unknown'}`} />}{showAll ? null : (LOGIN_STATE_LABELS[selected.loginStatus] ?? LOGIN_STATE_LABELS.unknown)}</div>
           <div className="platform-detail-actions">{showAll ? null : <button className="button secondary" onClick={() => window.open(selected.entryUrl, '_blank')}>打开平台</button>}<button className="button primary" onClick={() => setAdding(true)}>添加账号</button></div>
         </div>
+        {showAll
+          ? (platforms.some((item) => cooldowns[item.id])
+            ? <div className="platform-cooldown-list">
+            {platforms.filter((item) => cooldowns[item.id]).map((item) => <div key={item.id} className="platform-cooldown-notice">
+              <div><strong>{item.label} 已因连续遇到验证码暂停</strong><span>暂停至 {formatTime(cooldowns[item.id]?.until)}　·　{cooldowns[item.id]?.reason}</span></div>
+              <button className="button secondary" onClick={() => clearCooldown(item.id).catch(() => undefined)}>立即恢复</button>
+            </div>)}
+          </div>
+            : null)
+          : cooldown
+            ? <div className="platform-cooldown-notice">
+              <div><strong>该平台已因连续遇到验证码暂停</strong><span>暂停至 {formatTime(cooldown.until)}　·　{cooldown.reason}</span></div>
+              <button className="button secondary" onClick={() => clearCooldown(selected.id).catch(() => undefined)}>立即恢复</button>
+            </div>
+            : null}
+
         {showAll
           ? <dl className="platform-detail-meta"><div><dt>平台数量</dt><dd>{platforms.length} 个</dd></div><div><dt>账号总数</dt><dd>{own.length} 个</dd></div><div><dt>可用账号</dt><dd>{own.filter((profile) => profile.health === 'ready').length} 个</dd></div><div><dt>受限账号</dt><dd>{own.filter((profile) => profile.health === 'restricted').length} 个</dd></div><div><dt>待登录</dt><dd>{own.filter((profile) => profile.health === 'new' || profile.health === 'expired').length} 个</dd></div><div><dt>已停用</dt><dd>{own.filter((profile) => profile.health === 'disabled').length} 个</dd></div></dl>
           : <dl className="platform-detail-meta"><div><dt>账号总数</dt><dd>{own.length} 个</dd></div><div><dt>可用账号</dt><dd>{own.filter((profile) => profile.health === 'ready').length} 个</dd></div><div><dt>受限账号</dt><dd>{own.filter((profile) => profile.health === 'restricted').length} 个</dd></div><div><dt>入口</dt><dd>{selected.entryUrl}</dd></div></dl>}

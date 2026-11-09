@@ -27,6 +27,7 @@ export const api = {
   listPlatforms: () => request('/api/platforms'),
   listPlatformStatus: () => request('/api/platforms/status'),
   listProfiles: (platformId = '') => request(`/api/profiles${platformId ? `?platformId=${encodeURIComponent(platformId)}` : ''}`),
+  clearPlatformCooldown: (platformId) => request(`/api/platforms/${encodeURIComponent(platformId)}/cooldown/clear`, { method: 'POST', body: '{}' }),
   createProfile: (body) => request('/api/profiles', { method: 'POST', body: JSON.stringify(body) }),
   updateProfile: (profileId, body) => request(`/api/profiles/${profileId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   disableProfile: (profileId) => request(`/api/profiles/${profileId}/disable`, { method: 'POST' }),

@@ -131,6 +131,16 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_profiles_platform_id ON profiles(platform_id);
 
+  -- 平台级冷却：连续撞上验证码时先让平台歇一会儿，
+  -- 避免继续硬刷把账号搞进风控（DeepSeek 就是这样被禁言的）。
+  CREATE TABLE IF NOT EXISTS platform_cooldowns (
+    platform_id TEXT PRIMARY KEY,
+    cooldown_until TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    strike_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS task_events (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

@@ -66,6 +66,7 @@ export function buildServer({
   // 前端据此提示哪些账号已被平台限制或需要重新登录。
   app.get('/api/platforms/status', async () => listPlatformAdapters().map((platform) => {
     const profiles = repo.listProfiles({ platformId: platform.id });
+    const cooldown = repo.getPlatformCooldown(platform.id);
     const healthy = profiles.filter((profile) => profile.health === 'ready').length;
     const restricted = profiles.filter((profile) => profile.health === 'restricted').length;
     return {
@@ -74,6 +75,9 @@ export function buildServer({
       entryUrl: platform.entryUrl,
       defaultMode: platform.defaultMode ?? (platform.id === 'doubao' ? 'headed' : 'headless'),
       loginStatus: profiles.length === 0 ? 'none' : healthy > 0 ? 'ready' : restricted > 0 ? 'restricted' : 'unknown',
+      cooldown: cooldown?.coolingDown
+        ? { until: cooldown.cooldownUntil, reason: cooldown.reason }
+        : null,
       riskLevel: platform.id === 'doubao' ? 'elevated' : 'normal',
       profiles,
       profileSummary: {
@@ -89,6 +93,13 @@ export function buildServer({
   }));
 
   // ---- 登录态 Profile ----
+  // 平台因验证码被暂停后，可以手动解除冷却立即恢复调度。
+  app.post('/api/platforms/:platformId/cooldown/clear', async (request) => {
+    getPlatformAdapter(requireString(request.params.platformId, 'platformId'));
+    repo.clearPlatformCooldown(request.params.platformId);
+    return { platformId: request.params.platformId, cleared: true };
+  });
+
   app.get('/api/profiles', async (request) => repo.listProfiles({ platformId: request.query.platformId }));
   app.post('/api/profiles', async (request, reply) => {
     const body = requireBody(request.body);

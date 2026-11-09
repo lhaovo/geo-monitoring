@@ -19,6 +19,10 @@ const SEND_BUTTON_SELECTORS = [
   'button[class*=submit]',
 ];
 
+// 等待回答期间探测验证码的间隔。验证码与风控提示往往在提交问题之后才出现，
+// 只在打开页面时探测一次会完全漏掉。
+const CHALLENGE_PROBE_INTERVAL_MS = 5_000;
+
 const LOGIN_PROMPT_SELECTORS = [
   'input[type=password]:visible',
   'input[autocomplete=one-time-code]:visible',
@@ -50,10 +54,20 @@ const CHALLENGE_SELECTORS = [
   '[class*=slider-verify]:visible',
   '[class*=sliderVerify]:visible',
   '[class*=security-verify]:visible',
+  // 阿里云内容安全（Baxia）的滑块验证：拦截框本身不带 captcha 字样，
+  // 真正的验证码渲染在 punish iframe 里，选择器要覆盖这两种形态。
+  'iframe[id*=baxia]:visible',
+  'iframe[src*=baxia]:visible',
+  'iframe[src*=punish]:visible',
+  'iframe[src*="_____tmd_____"]:visible',
+  '[class*=baxia-dialog]:visible',
+  '[class*=nc-container]:visible',
+  '[class*=nc_wrapper]:visible',
+  '[class*=aliyun-captcha]:visible',
 ];
 
 const LOGIN_TEXT_PATTERN = /^(?:登录|立即登录|手机号登录|手机号码登录|验证码登录|短信登录|密码登录|账号密码登录|扫码登录|登录\/注册)$/u;
-const CHALLENGE_TEXT_PATTERN = /(?:请完成安全验证|拖动滑块|滑到最右|完成拼图|验证码校验)/u;
+const CHALLENGE_TEXT_PATTERN = /(?:请完成安全验证|拖动滑块|滑到最右|完成拼图|验证码校验|请按住滑块|拖动到最右边|请拖动下方滑块完成验证|通过验证以确保正常访问|向右滑动|向右拖动滑块)/u;
 const LOGIN_ERROR_PATTERN = /(?:账号或密码错误|账号密码错误|用户名或密码错误|密码错误|验证码错误|验证码不正确|验证码无效|无效的验证码|验证码已失效|验证码已过期|验证码格式|手机号格式不正确|请输入正确的手机号|登录失败|登录异常)/u;
 const LOGIN_INPUT_PATTERN = /(?:手机号|手机号码|验证码|密码|账号|帐号|邮箱|phone|mobile|password|passcode|verification|one[- ]?time)/iu;
 const ACCOUNT_RESTRICTION_PATTERN = /(?:\u8fdd\u53cd\u7528\u6237\u4f7f\u7528\u89c4\u8303|(?:\u8d26\u53f7|\u8d26\u6237|\u5e10\u53f7)[^\u3002\uff01\uff1f!?\n]{0,32}(?:\u7981\u8a00|\u5c01\u7981|\u9650\u5236|\u7981\u6b62\u4f7f\u7528|\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528)|(?:\u4f60|\u60a8)(?:\u5df2|\u88ab)[^\u3002\uff01\uff1f!?\n]{0,12}(?:\u7981\u6b62\u4f7f\u7528|\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528))/u;
@@ -234,6 +248,63 @@ export async function describeLoginPage(page) {
       : null,
     challengeWidgets: widgets,
   };
+}
+
+// 有头模式下等待操作员手动完成验证码。
+// 探测结果不再是 challenge 即认为验证已通过（页面回到正常对话即算通过）。
+async function waitForChallengeCleared(page, loginState, deadline) {
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(1_000);
+    const state = await probeLoginState(page, loginState).catch(() => null);
+    if (state?.status !== 'challenge') return true;
+  }
+  return false;
+}
+
+// 等待回答期间探测验证码与登录态变化。
+// - headless：命中拦截立刻抛出对应错误，交由上层快速失败
+// - headed：等待操作员在可见窗口里手动把验证码过掉
+// 返回 { cleared: true } 表示人工处理完验证码，可以继续等回答；返回 null 表示一切正常。
+export async function guardAgainstInterruption(page, loginState, {
+  mode = 'headless',
+  challengeTimeoutMs = 180_000,
+  onChallenge = null,
+} = {}) {
+  const state = await probeLoginState(page, loginState).catch(() => null);
+  if (!state) return null;
+  if (state.status === 'restricted') {
+    const error = new Error(state.message ?? '账号已被平台限制。');
+    error.code = 'account_restricted';
+    error.restrictedUntil = state.restrictedUntil ?? null;
+    error.restrictionType = state.restrictionType ?? 'restricted';
+    throw error;
+  }
+  if (state.status === 'unauthenticated') {
+    const error = new Error('登录状态已失效，请重新登录该账号后再执行监控。');
+    error.code = 'login_required';
+    error.loginState = state;
+    throw error;
+  }
+  if (state.status !== 'challenge') return null;
+
+  if (mode !== 'headed') {
+    const error = new Error('平台要求人工完成验证码或安全校验，本次未继续执行。');
+    error.code = 'human_challenge';
+    error.loginState = state;
+    throw error;
+  }
+
+  // 有头模式：等操作员在可见窗口里手动把验证码过掉。
+  onChallenge?.({ status: 'challenge', timeoutMs: challengeTimeoutMs, loginState: state });
+  const cleared = await waitForChallengeCleared(page, loginState, Date.now() + challengeTimeoutMs);
+  if (!cleared) {
+    const error = new Error('等待人工完成验证码超时。');
+    error.code = 'human_challenge';
+    error.loginState = state;
+    throw error;
+  }
+  onChallenge?.({ status: 'cleared', timeoutMs: 0, loginState: null });
+  return { cleared: true };
 }
 
 export async function waitForAuthenticated(page, timeoutMs = 30_000) {
@@ -727,6 +798,7 @@ export function createChatPlatformAdapter({
     label,
     entryUrl,
     defaultMode,
+    loginState,
     inspectLoginState(page) {
       return probeLoginState(page, loginState);
     },
@@ -739,12 +811,20 @@ export function createChatPlatformAdapter({
     captureShareLink(page, options = {}) {
       return captureShareLink(page, shareFlow, options);
     },
-    async waitForAnswer(page, { timeoutMs = 300_000, stableForMs = 4_000, minimumLength = minimumAnswerLength } = {}) {
+    async waitForAnswer(page, {
+      timeoutMs = 300_000,
+      stableForMs = 4_000,
+      minimumLength = minimumAnswerLength,
+      mode = 'headless',
+      challengeTimeoutMs = 180_000,
+      onChallenge = null,
+    } = {}) {
       const effectiveTimeoutMs = Math.max(timeoutMs, minimumAnswerTimeoutMs);
-      const deadline = Date.now() + effectiveTimeoutMs;
+      let deadline = Date.now() + effectiveTimeoutMs;
       let previous = '';
       let stableSince = null;
       let lastComplete = answerCompleteSelectors.length === 0;
+      let lastProbeAt = 0;
       while (Date.now() < deadline) {
         const content = await readLastResponse(page, responseSelectors);
         lastComplete = answerCompleteSelectors.length === 0
@@ -756,6 +836,17 @@ export function createChatPlatformAdapter({
           } else {
             previous = content;
             stableSince = null;
+          }
+        }
+
+        // 验证码与风控提示通常在提交问题之后才出现，
+        // 这里必须持续探测，否则只能白等到超时才发现出了问题。
+        if (Date.now() - lastProbeAt >= CHALLENGE_PROBE_INTERVAL_MS) {
+          lastProbeAt = Date.now();
+          const interruption = await guardAgainstInterruption(page, loginState, { mode, challengeTimeoutMs, onChallenge });
+          if (interruption?.cleared) {
+            // 人工处理的时间不计入回答超时，给回答重新留出完整的时间窗。
+            deadline = Date.now() + effectiveTimeoutMs;
           }
         }
         await page.waitForTimeout(1_000);

@@ -161,8 +161,10 @@ export function buildServer({
   app.get('/api/brands/:brandId', async (request) => repo.getBrand(request.params.brandId));
   app.patch('/api/brands/:brandId', async (request) => repo.updateBrand(request.params.brandId, requireBody(request.body)));
   app.get('/api/brands/:brandId/overview', async (request) => repo.getBrandOverview(request.params.brandId, { days: request.query.days }));
-  app.get('/api/brands/:brandId/sources', async (request) => repo.getBrandSources(request.params.brandId, {
-    days: request.query.days, platformId: request.query.platformId,
+    app.get('/api/brands/:brandId/sources', async (request) => repo.getBrandSources(request.params.brandId, {
+    days: request.query.days, platformId: request.query.platformId, domain: request.query.domain,
+    promptId: request.query.promptId, mention: request.query.mention, owned: request.query.owned,
+    search: request.query.search, sort: request.query.sort,
   }));
   // 品牌名、别名或产品词调整后，可以手动回算历史回答的提及口径。
   app.post('/api/brands/:brandId/recompute-analysis', async (request) => repo.recomputeBrandAnalysis(request.params.brandId));

@@ -219,11 +219,225 @@ function RunDetail({ run, onSelectCell, onCancel }) {
   return <section className="card run-detail"><div className="detail-header"><div><div className="page-eyebrow">TASK DETAIL</div><h3>{formatTime(run.createdAt)} 的监控任务</h3><p>{run.completedChecks}/{run.totalChecks} 检查完成 · {run.mentionedChecks} 个回答提到品牌 · {run.citationCount} 条引用</p></div><div className="detail-actions"><StatusPill status={displayRunStatus(run)} />{['queued', 'running'].includes(run.status) && <button className="button danger-outline" onClick={() => onCancel(run.id)}>{run.cancelRequestedAt ? '取消中…' : '取消任务'}</button>}</div></div><div className="detail-progress"><div className="progress-line large"><span style={{ width: `${progressPercent(run)}%` }} /></div><span>{progressPercent(run)}%</span></div><div className="matrix-wrap"><table className="matrix"><thead><tr><th>监控问题</th>{run.targetPlatforms.map((id) => <th key={id}><PlatformBadge id={id} /></th>)}</tr></thead><tbody>{grouped.map((row) => <tr key={row.id}><td><strong>{row.prompt?.text || '未知问题'}</strong></td>{run.targetPlatforms.map((id) => <td key={id}><button className={`matrix-cell ${row.cells[id]?.status || 'queued'}`} onClick={() => row.cells[id] && onSelectCell(row.cells[id])}>{row.cells[id] ? <><StatusPill status={row.cells[id].status} />{row.cells[id].answer ? <span className={row.cells[id].answer.brandMentioned ? 'mention yes' : 'mention'}>{row.cells[id].answer.brandMentioned ? '已提及' : '未提及'}</span> : null}<small>{row.cells[id].answer ? `${row.cells[id].answer.citations.length} 条来源` : row.cells[id].errorMessage || '等待执行'}</small></> : <span>—</span>}</button></td>)}</tr>)}</tbody></table></div></section>;
 }
 
-function SourcesPage({ sources, onReload }) {
-  const [platform, setPlatform] = useState('');
-  useEffect(() => { onReload(platform); }, [platform]);
-  if (!sources) return <EmptyState title="正在加载来源" description="读取品牌在回答中的原始引用网页。" />;
-  return <><PageHeader eyebrow="SOURCE EVIDENCE" title="来源中心" description="查看品牌相关回答引用了哪些原网页，并保留跨平台出现记录。" actions={<><select className="select compact" defaultValue="30"><option value="30">近 30 天</option><option value="90">近 90 天</option></select><button className="button secondary" onClick={() => window.print()}>导出 / 打印</button></>} /><section className="metric-grid source-metrics"><MetricCard label="唯一 URL" value={formatCount(sources.summary.uniqueUrls)} hint={`${sources.summary.domains} 个域名`} tone="blue" /><MetricCard label="引用记录" value={formatCount(sources.summary.citationCount)} hint={`${sources.summary.citationOccurrences} 次出现`} tone="violet" /><MetricCard label="来源平台" value={formatCount(new Set(sources.sources.flatMap((item) => item.platforms)).size)} hint="跨平台保留明细" tone="green" /><MetricCard label="提及品牌来源" value={formatCount(sources.summary.sourceMentionedUrls)} hint={`占 ${formatRate(sources.summary.sourceMentionedRate)} 的来源`} tone="orange" /><MetricCard label="时间范围" value={`${sources.summary.periodDays} 天`} hint="可切换周期" tone="violet" /></section><section className="card"><div className="filter-bar"><span className="filter-title">URL 明细</span><select className="select" value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="">全部平台</option>{Object.keys(PLATFORM_META).map((id) => <option key={id} value={id}>{platformLabel(id)}</option>)}</select><span className="filter-count">同一 URL 跨平台不丢失出现记录</span></div><div className="source-list">{sources.sources.map((item) => <article className="source-row" key={item.url}><div className="source-title"><strong>{item.title || item.domain || item.url}</strong><a href={item.url} target="_blank" rel="noreferrer">打开原网页 ↗</a><small>{item.url}</small></div><div className="source-tags">{item.platforms.map((id) => <PlatformBadge key={id} id={id} />)}{item.brandMentioned ? <span className="source-mention">提及品牌{item.matchedTerms?.length ? ` · ${item.matchedTerms.join('、')}` : ''}</span> : null}</div><div className="source-number"><strong>{item.citationOccurrences || item.citationCount}</strong><small>次引用</small></div><div className="source-number"><strong>{item.prompts.length}</strong><small>个问题</small></div><time>{formatTime(item.lastSeenAt)}</time></article>)}{!sources.sources.length && <EmptyState title="还没有来源记录" description="完成带搜索的回答后，原网页会出现在这里。" />}</div></section></>;
+const SOURCE_DAY_OPTIONS = [
+  { value: 7, label: '近 7 天' },
+  { value: 30, label: '近 30 天' },
+  { value: 90, label: '近 90 天' },
+  { value: 180, label: '近 180 天' },
+  { value: 365, label: '近 365 天' },
+];
+
+const SOURCE_SORT_OPTIONS = [
+  { value: 'citations', label: '按引用次数' },
+  { value: 'questions', label: '按覆盖问题数' },
+  { value: 'lastSeen', label: '按最近出现' },
+  { value: 'domain', label: '按域名' },
+];
+
+// 排行条：域名、问题、平台共用一套条形展示。
+function RankCard({ title, description, items, emptyText, activeKey, onSelect, valueLabel = '次引用' }) {
+  const max = Math.max(1, ...items.map((item) => item.value));
+  return <section className="card rank-card">
+    <div className="card-heading"><div><h3>{title}</h3><p>{description}</p></div></div>
+    {items.length ? <ol className="rank-list">
+      {items.map((item, index) => <li key={item.key}>
+        <button type="button" className={`rank-item ${activeKey === item.key ? 'active' : ''}`} onClick={() => onSelect?.(item)} disabled={!onSelect}>
+          <span className="rank-index">{index + 1}</span>
+          <span className="rank-main">
+            <span className="rank-head"><strong title={item.title}>{item.title}</strong><em>{formatCount(item.value)} {valueLabel}</em></span>
+            <span className="rank-bar"><i style={{ width: `${Math.max(3, (item.value / max) * 100)}%` }} /></span>
+            <small>{item.meta}</small>
+          </span>
+        </button>
+      </li>)}
+    </ol> : <p className="rank-empty">{emptyText}</p>}
+  </section>;
+}
+
+// 来源中心：既看整体看板，也支持按平台、域名、问题、关键词逐层下钻。
+function SourcesPage({ brand }) {
+  const [sources, setSources] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [filters, setFilters] = useState({ days: 30, platformId: '', domain: '', promptId: '', mention: '', owned: '', search: '', sort: 'citations' });
+  const [keywordInput, setKeywordInput] = useState('');
+  const [expandedUrl, setExpandedUrl] = useState('');
+  const [visibleCount, setVisibleCount] = useState(40);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const data = await api.getBrandSources(brand.id, filters);
+        if (!cancelled) { setSources(data); setError(''); }
+      } catch (cause) {
+        if (!cancelled) setError(cause.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, filters.search ? 320 : 0);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [brand?.id, filters]);
+
+  // 搜索框输入做防抖，避免每敲一个字就打一次后端。
+  useEffect(() => {
+    const timer = setTimeout(() => setFilters((current) => (
+      current.search === keywordInput.trim() ? current : { ...current, search: keywordInput.trim() }
+    )), 320);
+    return () => clearTimeout(timer);
+  }, [keywordInput]);
+
+  const update = (patch) => setFilters((current) => ({ ...current, ...patch }));
+  const resetFilters = () => {
+    setFilters({ days: 30, platformId: '', domain: '', promptId: '', mention: '', owned: '', search: '', sort: 'citations' });
+    setKeywordInput('');
+    setExpandedUrl('');
+  };
+  const activeFilterCount = ['platformId', 'domain', 'promptId', 'mention', 'owned'].filter((key) => filters[key]).length
+    + (filters.search ? 1 : 0);
+
+  const summary = sources?.summary ?? {};
+  const domainItems = (sources?.domains ?? []).slice(0, 12).map((item) => ({
+    key: item.domain,
+    value: item.urlCount,
+    title: item.domain,
+    meta: `${formatCount(item.citationCount)} 次引用${item.citationOccurrences ? ` · ${formatCount(item.citationOccurrences)} 次出现` : ''} · 占 ${item.urlShare}% 的来源 · ${item.platforms.map(platformLabel).join('、') || '—'}${item.owned ? ' · 自有域名' : ''}`,
+  }));
+  const questionItems = (sources?.questions ?? []).slice(0, 12).map((item) => ({
+    key: item.promptId,
+    value: item.citationCount,
+    title: item.text,
+    meta: `${item.urlCount} 个来源 · ${item.domainCount} 个域名 · ${item.mentionedUrls} 个来源提及品牌 · ${item.platforms.map(platformLabel).join('、') || '—'}`,
+  }));
+  const platformItems = sources?.platformStats ?? [];
+  const platformMax = Math.max(1, ...platformItems.map((item) => item.citationCount));
+  const sourceRows = sources?.sources ?? [];
+  const visibleSources = sourceRows.slice(0, visibleCount);
+  const sortLabel = SOURCE_SORT_OPTIONS.find((item) => item.value === filters.sort)?.label ?? '按引用次数';
+  const latestStamp = summary.latestSeenAt ? formatTime(summary.latestSeenAt).split(' ') : [];
+  const latestDate = latestStamp[0] ?? '';
+  const latestTime = latestStamp[1] ?? '—';
+
+  if (!sources && loading) return <EmptyState title="正在加载来源" description="读取品牌在回答中的原始引用网页。" />;
+
+  return <>
+    <PageHeader eyebrow="SOURCE EVIDENCE" title="来源中心" description="查看品牌相关回答引用了哪些原网页，并保留跨平台出现记录。" actions={<>
+      <select className="select compact" value={filters.days} onChange={(event) => update({ days: Number(event.target.value) })}>
+        {SOURCE_DAY_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+      </select>
+      <button className="button secondary" onClick={() => window.print()}>导出 / 打印</button>
+    </>} />
+
+    {error ? <div className="notice">{error}</div> : null}
+
+    <section className="metric-grid source-metrics">
+      <MetricCard label="唯一 URL" value={formatCount(summary.uniqueUrls)} hint={`${formatCount(summary.domains)} 个域名`} tone="blue" />
+      <MetricCard label="引用记录" value={formatCount(summary.citationCount)} hint={`${formatCount(summary.citationOccurrences)} 次出现`} tone="violet" />
+      <MetricCard label="覆盖问题" value={formatCount(summary.questionCount)} hint={`来自 ${formatCount(summary.platformCount)} 个平台 · 平均 ${formatCount(summary.avgCitationsPerQuestion)} 条/问题`} tone="green" />
+      <MetricCard label="提及品牌来源" value={formatCount(summary.sourceMentionedUrls)} hint={`占 ${formatRate(summary.sourceMentionedRate)} 的来源`} tone="orange" />
+      <MetricCard label="外部域名" value={formatCount(summary.externalDomains)} hint={summary.topDomain ? `Top ${summary.topDomain} 占 ${summary.topDomainShare}%` : '暂无域名数据'} tone="blue" />
+      <MetricCard label="自有域名引用" value={formatCount(summary.ownedDomainCitations)} hint={summary.ownedDomainCited ? '品牌自有站点被引用' : '暂未引用自有站点'} tone="green" />
+      <MetricCard label="平均每 URL" value={formatCount(summary.avgCitationsPerUrl)} hint={`${formatCount(summary.activeDays)} 天有新增来源`} tone="violet" />
+      <MetricCard label="最近出现" value={latestTime} hint={latestDate ? `${latestDate} · 时间范围 ${summary.periodDays ?? filters.days} 天` : `时间范围 ${summary.periodDays ?? filters.days} 天`} tone="orange" />
+    </section>
+
+    <section className="card source-filter-card">
+      <div className="filter-bar source-filters">
+        <span className="filter-title">筛选<small>{activeFilterCount ? `${activeFilterCount} 个条件生效` : '全部来源'}</small></span>
+        <input placeholder="搜索标题、网址或问题关键词" value={keywordInput} onChange={(event) => setKeywordInput(event.target.value)} />
+        <select className="select" value={filters.platformId} onChange={(event) => update({ platformId: event.target.value })}>
+          <option value="">全部平台</option>
+          {Object.keys(PLATFORM_META).map((id) => <option key={id} value={id}>{platformLabel(id)}</option>)}
+        </select>
+        <select className="select" value={filters.domain} onChange={(event) => update({ domain: event.target.value })}>
+          <option value="">全部域名</option>
+          {(sources?.options?.domains ?? []).map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+        <select className="select" value={filters.promptId} onChange={(event) => update({ promptId: event.target.value })}>
+          <option value="">全部问题</option>
+          {(sources?.options?.questions ?? []).map((item) => <option key={item.promptId} value={item.promptId}>{item.text}</option>)}
+        </select>
+        <select className="select" value={filters.sort} onChange={(event) => update({ sort: event.target.value })}>
+          {SOURCE_SORT_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+        <button type="button" className={`toggle ${filters.mention === 'mentioned' ? 'on' : ''}`} onClick={() => update({ mention: filters.mention === 'mentioned' ? '' : 'mentioned' })}>只看提及品牌</button>
+        <button type="button" className={`toggle ${filters.owned === 'owned' ? 'on' : ''}`} onClick={() => update({ owned: filters.owned === 'owned' ? '' : 'owned' })}>只看自有域名</button>
+        {activeFilterCount ? <button type="button" className="text-button" onClick={resetFilters}>重置筛选</button> : null}
+      </div>
+    </section>
+
+    <section className="source-rank-grid">
+      <RankCard title="域名来源排行" description="按该域名贡献的来源数量排序，点击只看该域名" items={domainItems} emptyText="当前筛选下没有域名数据。" activeKey={filters.domain} valueLabel="个来源"
+        onSelect={(item) => update({ domain: filters.domain === item.key ? '' : item.key })} />
+      <RankCard title="问题引用排行" description="哪些问题最常带出外部来源，点击只看该问题" items={questionItems} emptyText="当前筛选下没有问题数据。" activeKey={filters.promptId} valueLabel="次引用"
+        onSelect={(item) => update({ promptId: filters.promptId === item.key ? '' : item.key })} />
+    </section>
+
+    <section className="card">
+      <div className="card-heading"><div><h3>平台分布</h3><p>哪个平台最常把外部来源带进回答，点击可筛选</p></div></div>
+      {platformItems.length ? <div className="source-platform-grid">
+        {platformItems.map((item) => <button key={item.platformId} type="button" className={`source-platform ${filters.platformId === item.platformId ? 'active' : ''}`}
+          onClick={() => update({ platformId: filters.platformId === item.platformId ? '' : item.platformId })}>
+          <PlatformBadge id={item.platformId} />
+          <strong>{formatCount(item.citationCount)}</strong>
+          <small>次引用 · {formatCount(item.urlCount)} 个来源 · {formatCount(item.questionCount)} 个问题</small>
+          <span className="rank-bar"><i style={{ width: `${Math.max(3, (item.citationCount / platformMax) * 100)}%` }} /></span>
+        </button>)}
+      </div> : <p className="rank-empty">当前筛选下没有平台数据。</p>}
+    </section>
+
+    <section className="card">
+      <div className="card-heading">
+        <div><h3>URL 明细</h3><p>共 {formatCount(sourceRows.length)} 个来源，{sortLabel}；同一 URL 跨平台不丢失出现记录</p></div>
+        <span className="filter-count">显示前 {Math.min(visibleCount, sourceRows.length)} 条</span>
+      </div>
+      <div className="source-list">
+        {visibleSources.map((item) => {
+          const expanded = expandedUrl === item.url;
+          return <div className="source-item" key={item.url}>
+            <article className={`source-row ${expanded ? 'expanded' : ''}`}>
+              <div className="source-title">
+                <strong>{item.title || item.domain || item.url}</strong>
+                <a href={item.url} target="_blank" rel="noreferrer">打开原网页 ↗</a>
+                <small>{item.url}</small>
+              </div>
+              <div className="source-tags">
+                {item.platforms.map((id) => <PlatformBadge key={id} id={id} />)}
+                {item.owned ? <span className="source-owned">自有域名</span> : null}
+                {item.brandMentioned ? <span className="source-mention">提及品牌{item.matchedTerms?.length ? ` · ${item.matchedTerms.join('、')}` : ''}</span> : null}
+              </div>
+              <div className="source-number"><strong>{formatCount(item.citationOccurrences || item.citationCount)}</strong><small>次引用</small></div>
+              <div className="source-number"><strong>{formatCount(item.promptIds.length)}</strong><small>个问题</small></div>
+              <time>{formatTime(item.lastSeenAt)}</time>
+              <button type="button" className="source-expand" onClick={() => setExpandedUrl(expanded ? '' : item.url)}>
+                {expanded ? '收起' : '明细'} <span>{formatCount(item.detailTotal ?? item.details.length)}</span>
+              </button>
+            </article>
+            {expanded ? <div className="source-detail">
+              <div className="source-detail-head">
+                <strong>出现明细</strong>
+                <span>被 {item.prompts.length} 个问题、{item.platforms.length} 个平台引用{(item.detailTotal ?? 0) > item.details.length ? `，仅显示最近 ${item.details.length} 条` : ''}</span>
+              </div>
+              <div className="source-detail-list">
+                {item.details.map((detail, index) => <div className="source-detail-row" key={`${detail.answerId}-${index}`}>
+                  <PlatformBadge id={detail.platformId} />
+                  <button type="button" className="source-detail-question" title={detail.promptText} onClick={() => update({ promptId: detail.promptId })}>{detail.promptText}</button>
+                  {detail.brandMentioned ? <span className="source-mention">提及品牌{detail.matchedTerms?.length ? ` · ${detail.matchedTerms.join('、')}` : ''}</span> : null}
+                  <span className="source-detail-count">{formatCount(detail.occurrences)} 次出现</span>
+                  <time>{formatTime(detail.createdAt)}</time>
+                </div>)}
+              </div>
+            </div> : null}
+          </div>;
+        })}
+        {!sourceRows.length && <EmptyState title="还没有来源记录" description="完成带搜索的回答后，原网页会出现在这里。" />}
+      </div>
+      {visibleCount < sourceRows.length ? <div className="source-more">
+        <button type="button" className="button secondary" onClick={() => setVisibleCount((count) => count + 60)}>再加载 60 条（剩余 {formatCount(sourceRows.length - visibleCount)} 条）</button>
+      </div> : null}
+    </section>
+  </>;
 }
 
 function TrendsPage({ overview }) {
@@ -630,7 +844,6 @@ function App() {
   const [questions, setQuestions] = useState([]);
   const [runs, setRuns] = useState([]);
   const [activeRun, setActiveRun] = useState(null);
-  const [sources, setSources] = useState(null);
   const [platforms, setPlatforms] = useState([]);
   const [drawerRun, setDrawerRun] = useState(null);
   const [modal, setModal] = useState(null);
@@ -646,7 +859,6 @@ function App() {
   }, [brands]);
 
   const refreshOverview = useCallback(async () => { if (brand) setOverview(await api.getBrandOverview(brand.id)); }, [brand]);
-  const refreshSources = useCallback(async (platformId = '') => { if (brand) setSources(await api.getBrandSources(brand.id, 30, platformId)); }, [brand]);
   const openRun = useCallback(async (runId) => { const detail = await api.getRun(runId); setActiveRun(detail); navigate('runs', runId); }, []);
   const reloadQuestions = useCallback(async (payload) => { if (!brand) return; if (payload) await api.createQuestions(brand.id, payload); const next = await api.listQuestions(brand.id); setQuestions(next); await refreshOverview(); }, [brand, refreshOverview]);
 
@@ -666,7 +878,7 @@ function App() {
     });
   }, []);
   useEffect(() => { if (brand) loadBrand(brand.id).catch((cause) => setError(cause.message)); }, [brand?.id]);
-  useEffect(() => { if (!brand) return; if (['overview', 'trends', 'reports'].includes(route.view)) refreshOverview().catch((cause) => setError(cause.message)); if (route.view === 'sources') refreshSources().catch((cause) => setError(cause.message)); }, [brand?.id, route.view]);
+  useEffect(() => { if (!brand) return; if (['overview', 'trends', 'reports'].includes(route.view)) refreshOverview().catch((cause) => setError(cause.message)); }, [brand?.id, route.view]);
   useEffect(() => { if (route.runId) api.getRun(route.runId).then(setActiveRun).catch((cause) => setError(cause.message)); }, [route.runId]);
   useEffect(() => { if (!activeRun || !['queued', 'running'].includes(activeRun.status)) return undefined; const timer = setInterval(() => api.getRun(activeRun.id).then((run) => { setActiveRun(run); setRuns((items) => items.map((item) => item.id === run.id ? run : item)); if (!['queued', 'running'].includes(run.status)) refreshOverview().catch(() => undefined); }).catch(() => undefined), 2500); return () => clearInterval(timer); }, [activeRun?.id, activeRun?.status, refreshOverview]);
 
@@ -689,7 +901,7 @@ function App() {
     : currentView === 'overview' ? <OverviewPage overview={overview} onNewRun={() => setModal('run')} onOpenRun={openRun} onNavigate={navigate} />
       : currentView === 'questions' ? <QuestionsPage questions={questions} onReload={reloadQuestions} onNewRun={() => setModal('run')} />
         : currentView === 'runs' ? <RunsPage runs={runs} activeRun={activeRun} onOpenRun={openRun} onCancel={cancelRun} onNewRun={() => setModal('run')} onSelectCell={setDrawerRun} />
-          : currentView === 'sources' ? <SourcesPage sources={sources} onReload={refreshSources} />
+          : currentView === 'sources' ? <SourcesPage brand={brand} />
               : currentView === 'trends' ? <TrendsPage overview={overview} />
                 : currentView === 'reports' ? <ReportsPage overview={overview} />
                   : <OverviewPage overview={overview} onNewRun={() => setModal('run')} onOpenRun={openRun} onNavigate={navigate} />;

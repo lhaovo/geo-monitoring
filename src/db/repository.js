@@ -1,7 +1,7 @@
 import { createId, now } from '../shared/ids.js';
 import { NotFoundError, ValidationError } from '../shared/errors.js';
 import { normalizeAccountIdentity, normalizeProfileId, profileIdFromAccount } from '../profiles/account-identity.js';
-import { analyzeBrandMentions, analyzeCitationMentions, analyzeMentionSupport, analyzeOwnedDomainCitations } from '../analysis/brand-analysis.js';
+import { analyzeBrandMentions, analyzeCitationMentions, analyzeMentionSupport, analyzeOwnedDomainCitations, isOwnedDomain } from '../analysis/brand-analysis.js';
 
 const toBoolean = (value) => Boolean(value);
 
@@ -581,22 +581,59 @@ export class GeoRepository {
     return { brand, summary, platforms, questions, trend, recentRuns: this.listRuns({ projectId: brandId, limit: 10 }) };
   }
 
-  getBrandSources(brandId, { days = 30, platformId = '' } = {}) {
-    this.getBrand(brandId);
+  // 来源中心：把品牌在回答里引用的原网页聚合起来。
+  // 除了 URL 明细，还给出域名排行、问题维度与平台维度，
+  // 用来回答「哪些站点最常被引用」「某个问题引用了哪些来源」这类问题。
+  getBrandSources(brandId, {
+    days = 30, platformId = '', domain = '', promptId = '', mention = '', owned = '', search = '', sort = 'citations',
+  } = {}) {
+    const brand = this.getBrand(brandId);
     const safeDays = Math.max(1, Math.min(Number(days) || 30, 3650));
     const sinceTime = Date.now() - safeDays * 86400000;
-    const wherePlatform = platformId ? 'AND pr.platform_id = ?' : '';
-    const params = platformId ? [brandId, platformId] : [brandId];
-    const rawRows = this.database.prepare(`SELECT c.url, c.title, c.domain, c.citation_occurrences, c.created_at, pr.platform_id,
-      c.brand_mentioned, c.matched_terms_json,
-      p.id AS prompt_id, p.text AS prompt_text, a.id AS answer_id
-      FROM citations c JOIN answers a ON a.id = c.answer_id JOIN platform_runs pr ON pr.id = a.platform_run_id
-      JOIN runs r ON r.id = pr.run_id JOIN prompts p ON p.id = pr.prompt_id
-      WHERE r.project_id = ? ${wherePlatform} ORDER BY c.created_at DESC`).all(...params);
-    const rows = rawRows.filter((row) => new Date(row.created_at).getTime() >= sinceTime);
+    const ownedDomains = brand.ownedDomains ?? [];
+    const params = [brandId];
+    let where = 'WHERE r.project_id = ?';
+    if (platformId) { where += ' AND pr.platform_id = ?'; params.push(platformId); }
+    const rawRows = this.database.prepare(`SELECT c.id AS citation_id, c.url, c.title, c.domain,
+        c.citation_occurrences, c.brand_mentioned, c.matched_terms_json, c.created_at,
+        pr.platform_id, p.id AS prompt_id, p.text AS prompt_text, a.id AS answer_id
+      FROM citations c
+      JOIN answers a ON a.id = c.answer_id
+      JOIN platform_runs pr ON pr.id = a.platform_run_id
+      JOIN runs r ON r.id = pr.run_id
+      JOIN prompts p ON p.id = pr.prompt_id
+      ${where} ORDER BY c.created_at DESC`).all(...params);
+    // 时间范围在应用层过滤，保证「近 N 天」的窗口相对引用出现时间更直观。
+    const scoped = rawRows.filter((row) => new Date(row.created_at).getTime() >= sinceTime);
+
+    // 关键词与命中口径的筛选都在应用层做，域名与问题的候选项因此保持稳定，
+    // 用户切换其它筛选时不会看到选项凭空消失。
+    const keyword = String(search ?? '').trim().toLowerCase();
+    const mentionFilter = mention === 'mentioned' || mention === 'unmentioned' ? mention : '';
+    const ownedFilter = owned === 'owned' || owned === 'external' ? owned : '';
+    const keep = (row) => {
+      if (domain && row.domain !== domain) return false;
+      if (promptId && row.prompt_id !== promptId) return false;
+      if (mentionFilter === 'mentioned' && !toBoolean(row.brand_mentioned)) return false;
+      if (mentionFilter === 'unmentioned' && toBoolean(row.brand_mentioned)) return false;
+      if (ownedFilter === 'owned' && !isOwnedDomain(row.domain, ownedDomains)) return false;
+      if (ownedFilter === 'external' && isOwnedDomain(row.domain, ownedDomains)) return false;
+      if (keyword) {
+        const haystack = `${row.title ?? ''} ${row.url ?? ''} ${row.prompt_text ?? ''}`.toLowerCase();
+        if (!haystack.includes(keyword)) return false;
+      }
+      return true;
+    };
+    const rows = scoped.filter(keep);
+
     const byUrl = new Map();
     for (const row of rows) {
-      const item = byUrl.get(row.url) ?? { url: row.url, title: row.title, domain: row.domain, platforms: [], promptIds: [], prompts: [], citationCount: 0, citationOccurrences: 0, brandMentioned: false, matchedTerms: [], firstSeenAt: row.created_at, lastSeenAt: row.created_at };
+      const item = byUrl.get(row.url) ?? {
+        url: row.url, title: row.title, domain: row.domain,
+        platforms: [], promptIds: [], prompts: [], citationCount: 0, citationOccurrences: 0,
+        brandMentioned: false, matchedTerms: [], owned: isOwnedDomain(row.domain, ownedDomains),
+        firstSeenAt: row.created_at, lastSeenAt: row.created_at, details: [],
+      };
       byUrl.set(row.url, item);
       if (row.title && !item.title) item.title = row.title;
       if (!item.platforms.includes(row.platform_id)) item.platforms.push(row.platform_id);
@@ -609,26 +646,153 @@ export class GeoRepository {
       }
       if (row.created_at < item.firstSeenAt) item.firstSeenAt = row.created_at;
       if (row.created_at > item.lastSeenAt) item.lastSeenAt = row.created_at;
+      item.details.push({
+        platformId: row.platform_id, promptId: row.prompt_id, promptText: row.prompt_text,
+        answerId: row.answer_id, createdAt: row.created_at,
+        occurrences: Number(row.citation_occurrences || 0),
+        brandMentioned: toBoolean(row.brand_mentioned),
+        matchedTerms: parseJson(row.matched_terms_json, []),
+      });
     }
     const sources = [...byUrl.values()];
+    for (const item of sources) {
+      item.details.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+      item.detailTotal = item.details.length;
+      // 明细可能非常长，只回传最近的一批，避免一次响应撑爆内存。
+      item.details = item.details.slice(0, 30);
+    }
+    const sortSources = (list) => {
+      if (sort === 'lastSeen') return list.sort((left, right) => String(right.lastSeenAt).localeCompare(String(left.lastSeenAt)));
+      if (sort === 'domain') return list.sort((left, right) => String(left.domain).localeCompare(String(right.domain)));
+      if (sort === 'questions') return list.sort((left, right) => right.promptIds.length - left.promptIds.length || right.citationCount - left.citationCount);
+      return list.sort((left, right) => right.citationOccurrences - left.citationOccurrences
+        || right.citationCount - left.citationCount || String(right.lastSeenAt).localeCompare(String(left.lastSeenAt)));
+    };
+    sortSources(sources);
+
+    // 域名维度：哪些站点最常被引用。
+    const byDomain = new Map();
+    for (const item of sources) {
+      const entry = byDomain.get(item.domain) ?? {
+        domain: item.domain, urlCount: 0, citationCount: 0, citationOccurrences: 0,
+        platforms: [], promptIds: [], brandMentioned: false, owned: item.owned,
+        firstSeenAt: item.firstSeenAt, lastSeenAt: item.lastSeenAt,
+      };
+      byDomain.set(item.domain, entry);
+      entry.urlCount += 1;
+      entry.citationCount += item.citationCount;
+      entry.citationOccurrences += item.citationOccurrences;
+      for (const id of item.platforms) if (!entry.platforms.includes(id)) entry.platforms.push(id);
+      for (const id of item.promptIds) if (!entry.promptIds.includes(id)) entry.promptIds.push(id);
+      if (item.brandMentioned) entry.brandMentioned = true;
+      if (item.firstSeenAt < entry.firstSeenAt) entry.firstSeenAt = item.firstSeenAt;
+      if (item.lastSeenAt > entry.lastSeenAt) entry.lastSeenAt = item.lastSeenAt;
+    }
+    // 域名排行以「该域名贡献了多少个来源 URL」为主序，引用次数与出现次数作为参考。
+    const domains = [...byDomain.values()].sort((left, right) => right.urlCount - left.urlCount
+      || right.citationCount - left.citationCount || right.citationOccurrences - left.citationOccurrences
+      || String(left.domain).localeCompare(String(right.domain)));
+    const totalCitations = domains.reduce((total, item) => total + item.citationCount, 0);
+    const totalUrls = domains.reduce((total, item) => total + item.urlCount, 0);
+    for (const item of domains) {
+      item.share = totalCitations ? Math.round((item.citationCount / totalCitations) * 1000) / 10 : 0;
+      item.urlShare = totalUrls ? Math.round((item.urlCount / totalUrls) * 1000) / 10 : 0;
+    }
+
+    // 问题维度：某个问题引用了哪些来源、被哪些平台引用。
+    const byPrompt = new Map();
+    for (const row of rows) {
+      const entry = byPrompt.get(row.prompt_id) ?? {
+        promptId: row.prompt_id, text: row.prompt_text, citationCount: 0, citationOccurrences: 0,
+        platforms: [], mentionedUrls: 0, lastSeenAt: row.created_at,
+        urls: new Set(), domains: new Set(), mentioned: new Set(),
+      };
+      byPrompt.set(row.prompt_id, entry);
+      entry.citationCount += 1;
+      entry.citationOccurrences += Number(row.citation_occurrences || 0);
+      entry.urls.add(row.url);
+      entry.domains.add(row.domain);
+      if (!entry.platforms.includes(row.platform_id)) entry.platforms.push(row.platform_id);
+      if (toBoolean(row.brand_mentioned)) entry.mentioned.add(row.url);
+      if (row.created_at > entry.lastSeenAt) entry.lastSeenAt = row.created_at;
+    }
+    const questions = [...byPrompt.values()].map((entry) => ({
+      promptId: entry.promptId, text: entry.text, citationCount: entry.citationCount,
+      citationOccurrences: entry.citationOccurrences, platforms: entry.platforms,
+      urlCount: entry.urls.size, domainCount: entry.domains.size,
+      mentionedUrls: entry.mentioned.size, lastSeenAt: entry.lastSeenAt,
+    })).sort((left, right) => right.citationCount - left.citationCount || right.urlCount - left.urlCount);
+
+    // 平台维度：哪个平台最常把外部来源带进回答。
+    const byPlatform = new Map();
+    for (const row of rows) {
+      const entry = byPlatform.get(row.platform_id) ?? {
+        platformId: row.platform_id, citationCount: 0, citationOccurrences: 0, mentionedUrls: 0,
+        lastSeenAt: row.created_at, urls: new Set(), domains: new Set(), prompts: new Set(), mentioned: new Set(),
+      };
+      byPlatform.set(row.platform_id, entry);
+      entry.citationCount += 1;
+      entry.citationOccurrences += Number(row.citation_occurrences || 0);
+      entry.urls.add(row.url);
+      entry.domains.add(row.domain);
+      entry.prompts.add(row.prompt_id);
+      if (toBoolean(row.brand_mentioned)) entry.mentioned.add(row.url);
+      if (row.created_at > entry.lastSeenAt) entry.lastSeenAt = row.created_at;
+    }
+    const platformStats = [...byPlatform.values()].map((entry) => ({
+      platformId: entry.platformId, citationCount: entry.citationCount,
+      citationOccurrences: entry.citationOccurrences, urlCount: entry.urls.size,
+      domainCount: entry.domains.size, questionCount: entry.prompts.size,
+      mentionedUrls: entry.mentioned.size, lastSeenAt: entry.lastSeenAt,
+    })).sort((left, right) => right.citationCount - left.citationCount);
+
     // 自有域名引用：衡量 AI 回答是否引用了品牌自己的站点。
-    const owned = analyzeOwnedDomainCitations(sources, { ownedDomains: this.getBrand(brandId).ownedDomains });
+    const ownedSummary = analyzeOwnedDomainCitations(sources, { ownedDomains });
+    const mentionedCitationCount = rows.filter((row) => toBoolean(row.brand_mentioned)).length;
+    const activeDays = new Set(rows.map((row) => String(row.created_at).slice(0, 10))).size;
+    const latestSeenAt = rows.length
+      ? rows.map((row) => row.created_at).sort((left, right) => String(left).localeCompare(String(right))).pop()
+      : null;
     return {
       summary: {
         uniqueUrls: sources.length,
-        domains: new Set(sources.map((item) => item.domain)).size,
-        citationCount: sources.reduce((total, item) => total + item.citationCount, 0),
-        citationOccurrences: sources.reduce((total, item) => total + item.citationOccurrences, 0),
-        ownedDomainCitations: owned.count,
-        ownedDomainCited: owned.cited,
+        domains: domains.length,
+        citationCount: rows.length,
+        citationOccurrences: rows.reduce((total, row) => total + Number(row.citation_occurrences || 0), 0),
+        ownedDomainCitations: ownedSummary.count,
+        ownedDomainCited: ownedSummary.cited,
         sourceMentionedUrls: sources.filter((item) => item.brandMentioned).length,
         sourceMentionedRate: sources.length
           ? Math.round((sources.filter((item) => item.brandMentioned).length / sources.length) * 1000) / 10
           : null,
         periodDays: safeDays,
+        // 以下为来源中心看板补充的细粒度指标。
+        questionCount: questions.length,
+        platformCount: platformStats.length,
+        mentionedCitationCount,
+        mentionedCitationRate: rows.length ? Math.round((mentionedCitationCount / rows.length) * 1000) / 10 : null,
+        topDomain: domains[0]?.domain ?? '',
+        topDomainShare: domains[0]?.urlShare ?? 0,
+        topDomainUrlCount: domains[0]?.urlCount ?? 0,
+        externalDomains: domains.filter((item) => !item.owned).length,
+        ownedDomainCount: domains.filter((item) => item.owned).length,
+        avgCitationsPerUrl: sources.length ? Math.round((rows.length / sources.length) * 10) / 10 : 0,
+        avgCitationsPerQuestion: questions.length ? Math.round((rows.length / questions.length) * 10) / 10 : 0,
+        activeDays,
+        latestSeenAt,
       },
-      ownedDomains: { cited: owned.cited, count: owned.count, citations: owned.citations },
+      ownedDomains: { cited: ownedSummary.cited, count: ownedSummary.count, citations: ownedSummary.citations },
+      domains,
+      questions,
+      platformStats,
       sources,
+      // 候选项基于「品牌 + 平台 + 时间」的范围提供，切换其它筛选时依然可用。
+      options: {
+        domains: [...new Set(scoped.map((row) => row.domain))].sort(),
+        questions: [...new Map(scoped.map((row) => [row.prompt_id, { promptId: row.prompt_id, text: row.prompt_text }])).values()]
+          .sort((left, right) => String(left.text).localeCompare(String(right.text))),
+      },
+      filters: { days: safeDays, platformId, domain, promptId, mention, owned, search, sort },
     };
   }
 

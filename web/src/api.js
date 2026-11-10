@@ -14,7 +14,15 @@ export const api = {
   listBrands: () => request('/api/brands'),
   createBrand: (body) => request('/api/brands', { method: 'POST', body: JSON.stringify(body) }),
   getBrandOverview: (brandId, days = 30) => request(`/api/brands/${brandId}/overview?days=${days}`),
-  getBrandSources: (brandId, days = 30, platformId = '') => request(`/api/brands/${brandId}/sources?days=${days}${platformId ? `&platformId=${encodeURIComponent(platformId)}` : ''}`),
+  getBrandSources: (brandId, params = {}) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '') return;
+      query.set(key, String(value));
+    });
+    const suffix = query.toString();
+    return request(`/api/brands/${brandId}/sources${suffix ? `?${suffix}` : ''}`);
+  },
   recomputeBrandAnalysis: (brandId) => request(`/api/brands/${brandId}/recompute-analysis`, { method: 'POST' }),
   listQuestions: (brandId) => request(`/api/brands/${brandId}/questions`),
   createQuestions: (brandId, body) => request(`/api/brands/${brandId}/questions`, { method: 'POST', body: JSON.stringify(body) }),

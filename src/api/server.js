@@ -166,6 +166,29 @@ export function buildServer({
     promptId: request.query.promptId, mention: request.query.mention, owned: request.query.owned,
     search: request.query.search, sort: request.query.sort,
   }));
+
+  // ---- 自有内容链接：监测自己发布的文章有没有被 AI 引用 ----
+  app.get('/api/brands/:brandId/owned-links', async (request) => repo.getBrandOwnedLinks(request.params.brandId, {
+    days: request.query.days, platformId: request.query.platformId, search: request.query.search,
+  }));
+  app.post('/api/brands/:brandId/owned-links', async (request, reply) => {
+    const body = requireBody(request.body);
+    // 传 urls 就是批量导入，一行一个链接；否则按单条创建。
+    if (Array.isArray(body.urls) || typeof body.urls === 'string') {
+      const result = repo.importBrandLinks(request.params.brandId, body.urls, {
+        title: body.title ?? '', label: body.label ?? '',
+      });
+      return reply.status(201).send(result);
+    }
+    const link = repo.createBrandLink(request.params.brandId, {
+      url: requireString(body.url, '链接'), title: body.title ?? '', label: body.label ?? '',
+    });
+    return reply.status(201).send(link);
+  });
+  app.patch('/api/brands/owned-links/:linkId', async (request) => repo.updateBrandLink(request.params.linkId, requireBody(request.body)));
+  app.delete('/api/brands/owned-links/:linkId', async (request) => repo.deleteBrandLink(request.params.linkId));
+  // 新增链接后回算历史引用，把之前采集到的来源一并标记出来。
+  app.post('/api/brands/:brandId/owned-links/recompute', async (request) => repo.recomputeBrandLinkCitations(request.params.brandId));
   // 品牌名、别名或产品词调整后，可以手动回算历史回答的提及口径。
   app.post('/api/brands/:brandId/recompute-analysis', async (request) => repo.recomputeBrandAnalysis(request.params.brandId));
 

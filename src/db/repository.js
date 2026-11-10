@@ -2,6 +2,7 @@ import { createId, now } from '../shared/ids.js';
 import { NotFoundError, ValidationError } from '../shared/errors.js';
 import { normalizeAccountIdentity, normalizeProfileId, profileIdFromAccount } from '../profiles/account-identity.js';
 import { analyzeBrandMentions, analyzeCitationMentions, analyzeMentionSupport, analyzeOwnedDomainCitations, isOwnedDomain } from '../analysis/brand-analysis.js';
+import { buildLinkIndex, matchOwnedLink, normalizeUrl } from '../analysis/owned-links.js';
 
 const toBoolean = (value) => Boolean(value);
 
@@ -109,6 +110,22 @@ function mapRun(row) {
   };
 }
 
+function mapBrandLink(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    brandId: row.brand_id,
+    url: row.url,
+    normalizedUrl: row.normalized_url,
+    pathKey: row.path_key,
+    domain: row.domain,
+    title: row.title,
+    label: row.label,
+    active: Boolean(row.active),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 function mapProfile(row) {
   if (!row) return null;
   return {
@@ -521,13 +538,17 @@ export class GeoRepository {
         JSON.stringify(sourceAnalysis.sourceMatchedTerms), sourceAnalysis.mentionBackedBySource ? 1 : 0,
         sourceAnalysis.mentionWithoutSource ? 1 : 0, timestamp);
       const citationStatement = this.database.prepare(`INSERT INTO citations
-        (id, answer_id, position, title, url, domain, citation_fragments_json, citation_occurrences, brand_mentioned, matched_terms_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        (id, answer_id, position, title, url, domain, citation_fragments_json, citation_occurrences, brand_mentioned, matched_terms_json, owned_link_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      // 采集到的来源先跟品牌自己的文章比对，命中就记下来，
+      // 这样「我们发的文章有没有被引用」可以直接在来源中心看到。
+      const ownedLinkIndex = buildLinkIndex(this.listBrandLinks(brand.id));
       for (const citation of result.citations ?? []) {
         const sourceRow = sourceRowsByUrl.get(citation.url);
         citationStatement.run(createId(), answerId, citation.position, citation.title ?? '', citation.url, citation.domain,
           JSON.stringify(citation.citationFragments ?? []), citation.citationOccurrences ?? 0,
-          sourceRow?.mentioned ? 1 : 0, JSON.stringify(sourceRow?.matchedTerms ?? []), timestamp);
+          sourceRow?.mentioned ? 1 : 0, JSON.stringify(sourceRow?.matchedTerms ?? []),
+          matchOwnedLink(citation.url, ownedLinkIndex)?.link.id ?? null, timestamp);
       }
       const artifactStatement = this.database.prepare('INSERT INTO artifacts (id, platform_run_id, kind, relative_path, created_at) VALUES (?, ?, ?, ?, ?)');
       for (const artifact of result.artifacts ?? []) artifactStatement.run(createId(), platformRunId, artifact.kind, artifact.relativePath, timestamp);
@@ -793,6 +814,157 @@ export class GeoRepository {
           .sort((left, right) => String(left.text).localeCompare(String(right.text))),
       },
       filters: { days: safeDays, platformId, domain, promptId, mention, owned, search, sort },
+    };
+  }
+
+  // ---- 自有内容链接：监测自己发布的文章有没有被 AI 引用 ----
+
+  listBrandLinks(brandId) {
+    this.getBrand(brandId);
+    return this.database.prepare('SELECT * FROM brand_links WHERE brand_id = ? ORDER BY created_at ASC').all(brandId).map(mapBrandLink);
+  }
+
+  getBrandLink(linkId) {
+    const link = mapBrandLink(this.database.prepare('SELECT * FROM brand_links WHERE id = ?').get(linkId));
+    if (!link) throw new NotFoundError('未找到该自有链接。');
+    return link;
+  }
+
+  createBrandLink(brandId, { url, title = '', label = '' }) {
+    this.getBrand(brandId);
+    const normalized = normalizeUrl(url);
+    if (!normalized) throw new ValidationError('链接格式不正确，请填写完整的 http(s) 链接。');
+    const existing = this.database.prepare('SELECT id FROM brand_links WHERE brand_id = ? AND normalized_url = ?').get(brandId, normalized.key);
+    if (existing) throw new ValidationError('这条链接已经在监测列表里了。');
+    const timestamp = now();
+    const id = createId();
+    this.database.prepare(`INSERT INTO brand_links
+      (id, brand_id, url, normalized_url, path_key, domain, title, label, active, created_at, updated_at)
+      VALUES (@id, @brandId, @url, @normalizedUrl, @pathKey, @domain, @title, @label, 1, @timestamp, @timestamp)`).run({
+      id, brandId, url: String(url ?? '').trim(), normalizedUrl: normalized.key, pathKey: normalized.pathKey,
+      domain: normalized.domain, title: String(title ?? '').trim(), label: String(label ?? '').trim(), timestamp,
+    });
+    return this.getBrandLink(id);
+  }
+
+  // 批量导入：一行一个链接，方便把整篇文章列表直接贴进来。
+  importBrandLinks(brandId, urls, { title = '', label = '' } = {}) {
+    this.getBrand(brandId);
+    const list = Array.isArray(urls) ? urls : String(urls ?? '').split(/[\r\n,，;；]+/u);
+    const result = { imported: 0, duplicates: 0, invalid: [] };
+    for (const item of list) {
+      const value = String(item ?? '').trim();
+      if (!value) continue;
+      const normalized = normalizeUrl(value);
+      if (!normalized) { result.invalid.push(value); continue; }
+      const existing = this.database.prepare('SELECT id FROM brand_links WHERE brand_id = ? AND normalized_url = ?').get(brandId, normalized.key);
+      if (existing) { result.duplicates += 1; continue; }
+      this.createBrandLink(brandId, { url: value, title, label });
+      result.imported += 1;
+    }
+    return result;
+  }
+
+  updateBrandLink(linkId, values = {}) {
+    const current = this.getBrandLink(linkId);
+    const title = values.title === undefined ? current.title : String(values.title ?? '').trim();
+    const label = values.label === undefined ? current.label : String(values.label ?? '').trim();
+    const active = values.active === undefined ? current.active : Boolean(values.active);
+    this.database.prepare('UPDATE brand_links SET title = ?, label = ?, active = ?, updated_at = ? WHERE id = ?')
+      .run(title, label, active ? 1 : 0, now(), linkId);
+    return this.getBrandLink(linkId);
+  }
+
+  deleteBrandLink(linkId) {
+    this.getBrandLink(linkId);
+    this.database.prepare('UPDATE citations SET owned_link_id = NULL WHERE owned_link_id = ?').run(linkId);
+    this.database.prepare('DELETE FROM brand_links WHERE id = ?').run(linkId);
+    return { id: linkId, deleted: true };
+  }
+
+  // 新增自有链接后回算历史引用，把之前采集到的来源也补上标记。
+  recomputeBrandLinkCitations(brandId) {
+    const links = this.listBrandLinks(brandId);
+    const index = buildLinkIndex(links);
+    const rows = this.database.prepare(`SELECT c.id, c.url FROM citations c
+      JOIN answers a ON a.id = c.answer_id JOIN platform_runs pr ON pr.id = a.platform_run_id
+      JOIN runs r ON r.id = pr.run_id WHERE r.project_id = ?`).all(brandId);
+    const update = this.database.prepare('UPDATE citations SET owned_link_id = ? WHERE id = ?');
+    let matched = 0;
+    const write = this.database.transaction(() => {
+      for (const row of rows) {
+        const owned = matchOwnedLink(row.url, index);
+        update.run(owned?.link.id ?? null, row.id);
+        if (owned) matched += 1;
+      }
+    });
+    write();
+    return { brandId, links: links.length, citations: rows.length, matched };
+  }
+
+  // 自有链接的引用情况：每篇文章被哪些问题、哪些平台引用过，最近一次是什么时候。
+  getBrandOwnedLinks(brandId, { days = 30, platformId = '', search = '' } = {}) {
+    this.getBrand(brandId);
+    const safeDays = Math.max(1, Math.min(Number(days) || 30, 3650));
+    const sinceTime = Date.now() - safeDays * 86400000;
+    const keyword = String(search ?? '').trim().toLowerCase();
+    const rows = this.database.prepare(`SELECT c.url, c.domain, c.title, c.citation_occurrences, c.brand_mentioned,
+        c.created_at, c.owned_link_id, pr.platform_id, p.id AS prompt_id, p.text AS prompt_text, a.id AS answer_id
+      FROM citations c JOIN answers a ON a.id = c.answer_id JOIN platform_runs pr ON pr.id = a.platform_run_id
+      JOIN runs r ON r.id = pr.run_id JOIN prompts p ON p.id = pr.prompt_id
+      WHERE r.project_id = ? AND c.owned_link_id IS NOT NULL AND c.owned_link_id <> ''
+      ORDER BY c.created_at DESC`).all(brandId)
+      .filter((row) => new Date(row.created_at).getTime() >= sinceTime)
+      .filter((row) => (platformId ? row.platform_id === platformId : true));
+    const byLink = new Map(this.listBrandLinks(brandId).map((link) => [link.id, {
+      ...link, cited: false, citationCount: 0, citationOccurrences: 0,
+      platforms: [], promptIds: [], prompts: [], details: [], firstSeenAt: null, lastSeenAt: null,
+    }]));
+    for (const row of rows) {
+      const entry = byLink.get(row.owned_link_id);
+      if (!entry) continue;
+      entry.cited = true;
+      entry.citationCount += 1;
+      entry.citationOccurrences += Number(row.citation_occurrences || 0);
+      if (!entry.platforms.includes(row.platform_id)) entry.platforms.push(row.platform_id);
+      if (!entry.promptIds.includes(row.prompt_id)) { entry.promptIds.push(row.prompt_id); entry.prompts.push(row.prompt_text); }
+      if (!entry.firstSeenAt || row.created_at < entry.firstSeenAt) entry.firstSeenAt = row.created_at;
+      if (!entry.lastSeenAt || row.created_at > entry.lastSeenAt) entry.lastSeenAt = row.created_at;
+      entry.details.push({
+        platformId: row.platform_id, promptId: row.prompt_id, promptText: row.prompt_text,
+        answerId: row.answer_id, createdAt: row.created_at,
+        occurrences: Number(row.citation_occurrences || 0), brandMentioned: toBoolean(row.brand_mentioned),
+      });
+    }
+    let items = [...byLink.values()];
+    const totalLinks = items.length;
+    for (const item of items) item.details.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+    if (keyword) {
+      items = items.filter((item) => `${item.title} ${item.label} ${item.url}`.toLowerCase().includes(keyword));
+    }
+    items.sort((left, right) => right.citationCount - left.citationCount
+      || right.citationOccurrences - left.citationOccurrences
+      || String(right.createdAt).localeCompare(String(left.createdAt)));
+    const citedItems = items.filter((item) => item.cited);
+    const platformSet = new Set(citedItems.flatMap((item) => item.platforms));
+    const questionSet = new Set(citedItems.flatMap((item) => item.promptIds));
+    const latestSeenAt = items.map((item) => item.lastSeenAt).filter(Boolean)
+      .sort((left, right) => String(left).localeCompare(String(right))).pop() ?? null;
+    return {
+      summary: {
+        links: items.length,
+        totalLinks,
+        citedLinks: citedItems.length,
+        unreferencedLinks: items.length - citedItems.length,
+        coverageRate: items.length ? Math.round((citedItems.length / items.length) * 1000) / 10 : null,
+        citationCount: citedItems.reduce((total, item) => total + item.citationCount, 0),
+        citationOccurrences: citedItems.reduce((total, item) => total + item.citationOccurrences, 0),
+        platformCount: platformSet.size,
+        questionCount: questionSet.size,
+        latestSeenAt,
+        periodDays: safeDays,
+      },
+      links: items,
     };
   }
 

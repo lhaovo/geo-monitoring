@@ -99,11 +99,28 @@ const SCHEMA = `
     citation_occurrences INTEGER NOT NULL DEFAULT 0,
     brand_mentioned INTEGER NOT NULL DEFAULT 0,
     matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    owned_link_id TEXT,
     created_at TEXT NOT NULL,
     UNIQUE(answer_id, url)
   );
   CREATE INDEX IF NOT EXISTS idx_citations_answer_id ON citations(answer_id);
 
+  -- 品牌自己发布的内容链接：用来监测「我们发的文章有没有被 AI 引用」。
+  CREATE TABLE IF NOT EXISTS brand_links (
+    id TEXT PRIMARY KEY,
+    brand_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    path_key TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(brand_id, normalized_url)
+  );
+  CREATE INDEX IF NOT EXISTS idx_brand_links_brand_id ON brand_links(brand_id);
   CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
     platform_run_id TEXT NOT NULL REFERENCES platform_runs(id) ON DELETE CASCADE,
@@ -212,6 +229,7 @@ export function openDatabase(databasePath) {
   ensureColumn(database, 'answers', 'mention_without_source', "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, 'citations', 'brand_mentioned', "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, 'citations', 'matched_terms_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(database, 'citations', 'owned_link_id', 'TEXT');
   ensureColumn(database, 'platform_runs', 'profile_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, 'platform_runs', 'share_status', "TEXT NOT NULL DEFAULT 'unavailable'");
   ensureColumn(database, 'platform_runs', 'share_url', 'TEXT');

@@ -358,3 +358,33 @@ input:focus, textarea:focus, .select:focus { border-color: #7e96ff; box-shadow: 
   .source-detail-question { grid-column: 1 / -1; }
   .source-detail-row time { text-align: left; }
 }
+/* ---- 来源中心：自有链接监测与域名跳转 ---- */
+.source-tabs { display: flex; gap: 6px; margin-bottom: 18px; }
+.source-tabs button { padding: 8px 15px; color: #64738c; border: 1px solid transparent; border-radius: 9px; background: transparent; font-size: 13px; font-weight: 650; cursor: pointer; }
+.source-tabs button:hover { color: #3f5fda; background: #f3f6ff; }
+.source-tabs button.active { color: #3f5fda; border-color: #d5e0ff; background: #f2f6ff; }
+.rank-item { cursor: default; }
+.rank-item.clickable { cursor: pointer; }
+.rank-item.clickable:hover .rank-head strong { color: var(--primary); }
+.rank-title { overflow: hidden; color: #34435e; font-size: 12px; font-weight: 600; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+.rank-title:hover { color: var(--primary); text-decoration: underline; }
+.source-links { display: flex; gap: 12px; }
+.source-links a { width: max-content; color: #5771dc; font-size: 10px; text-decoration: none; }
+.source-links a:hover { text-decoration: underline; }
+.source-untouched { width: max-content; padding: 3px 7px; color: #8995a7; background: #f1f3f6; border-radius: 5px; font-size: 10px; font-weight: 600; }
+.owned-toolbar { margin-bottom: 16px; }
+.card-actions { display: flex; gap: 9px; flex: none; }
+.owned-empty { margin: 0; padding: 26px 20px 30px; color: #8b97a8; font-size: 12px; text-align: center; }
+.owned-empty strong { display: block; margin-bottom: 6px; color: #4c5b74; font-size: 13px; }
+.owned-empty p { margin: 0; }
+.owned-link-row { grid-template-columns: minmax(0, 1.9fr) 1.1fr 70px 70px 140px 122px; }
+.owned-row-actions { display: flex; align-items: center; gap: 7px; }
+.source-remove { padding: 6px 9px; color: #b03c4c; border: 1px solid #f1c8ce; border-radius: 7px; background: #fff; font-size: 11px; cursor: pointer; }
+.source-remove:hover:not(:disabled) { background: #fff5f6; }
+.notice.success { color: #078562; background: #effbf7; border-color: #bde9da; }
+@media (max-width: 780px) {
+  .source-tabs { flex-wrap: wrap; }
+  .owned-link-row { grid-template-columns: 1fr auto; }
+  .owned-row-actions { grid-column: 1 / -1; }
+  .card-actions { flex-wrap: wrap; }
+}

@@ -24,6 +24,19 @@ export const api = {
     return request(`/api/brands/${brandId}/sources${suffix ? `?${suffix}` : ''}`);
   },
   recomputeBrandAnalysis: (brandId) => request(`/api/brands/${brandId}/recompute-analysis`, { method: 'POST' }),
+  getBrandOwnedLinks: (brandId, params = {}) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '') return;
+      query.set(key, String(value));
+    });
+    const suffix = query.toString();
+    return request(`/api/brands/${brandId}/owned-links${suffix ? `?${suffix}` : ''}`);
+  },
+  importBrandLinks: (brandId, body) => request(`/api/brands/${brandId}/owned-links`, { method: 'POST', body: JSON.stringify(body) }),
+  updateBrandLink: (linkId, body) => request(`/api/brands/owned-links/${linkId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteBrandLink: (linkId) => request(`/api/brands/owned-links/${linkId}`, { method: 'DELETE' }),
+  recomputeBrandLinkCitations: (brandId) => request(`/api/brands/${brandId}/owned-links/recompute`, { method: 'POST', body: '{}' }),
   listQuestions: (brandId) => request(`/api/brands/${brandId}/questions`),
   createQuestions: (brandId, body) => request(`/api/brands/${brandId}/questions`, { method: 'POST', body: JSON.stringify(body) }),
   updateQuestion: (questionId, body) => request(`/api/brands/questions/${questionId}`, { method: 'PATCH', body: JSON.stringify(body) }),

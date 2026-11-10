@@ -783,7 +783,25 @@ export class GeoRepository {
     return this.listProfiles({ platformId })
       .filter((profile) => !excluded.has(profile.profileId))
       .filter((profile) => profile.health === 'ready')
-      .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)))[0] ?? null;
+      // 轮转使用：优先挑最久没被用过的账号。
+      // 早期实现按创建时间取第一个，等于永远只用最早创建的那个号，
+      // 另一个登录态从未参与监测，平台配额与风控计数全压在一个号上。
+      .sort((left, right) => {
+        const leftUsed = left.lastUsedAt ? Date.parse(left.lastUsedAt) : 0;
+        const rightUsed = right.lastUsedAt ? Date.parse(right.lastUsedAt) : 0;
+        if (leftUsed !== rightUsed) return leftUsed - rightUsed;
+        return String(left.createdAt).localeCompare(String(right.createdAt));
+      })[0] ?? null;
+  }
+
+  // 记录一次登录态分配：只更新最近使用时间，不改动健康状态。
+  // 失败的账号同样要记，否则它会一直被优先选中而其它账号闲着。
+  touchProfileUsage(platformId, profileKey) {
+    const profile = this.getProfileByBinding(platformId, profileKey);
+    if (!profile) return null;
+    const timestamp = now();
+    this.database.prepare('UPDATE profiles SET last_used_at = ?, updated_at = ? WHERE id = ?').run(timestamp, timestamp, profile.id);
+    return this.getProfile(profile.id);
   }
 
   // ---- 平台级冷却（验证码风控） ----

@@ -90,3 +90,33 @@ test('停用登录态后不再被选中', async () => {
     assert.equal(repository.pickAvailableProfile('qwen'), null);
   });
 });
+
+test('多个可用登录态会轮转使用', async () => {
+  await withRepository(async (repository) => {
+    const first = repository.createProfile({ platformId: 'doubao', account: '13800000001' });
+    const second = repository.createProfile({ platformId: 'doubao', account: '13800000002' });
+    repository.updateProfile(first.id, { health: 'ready' });
+    repository.updateProfile(second.id, { health: 'ready' });
+
+    const picked = repository.pickAvailableProfile('doubao');
+    assert.equal(picked.id, first.id);
+    repository.touchProfileUsage('doubao', picked.profileId);
+    assert.equal(repository.pickAvailableProfile('doubao').id, second.id);
+    repository.touchProfileUsage('doubao', second.profileId);
+    assert.equal(repository.pickAvailableProfile('doubao').id, first.id);
+  });
+});
+
+test('轮转会跳过受限与停用的登录态', async () => {
+  await withRepository(async (repository) => {
+    const healthy = repository.createProfile({ platformId: 'kimi', account: '13800000003' });
+    const blocked = repository.createProfile({ platformId: 'kimi', account: '13800000004' });
+    repository.updateProfile(healthy.id, { health: 'ready' });
+    repository.updateProfile(blocked.id, { health: 'restricted', restrictedUntil: '2030-01-01T00:00:00.000Z' });
+
+    const picked = repository.pickAvailableProfile('kimi');
+    assert.equal(picked.id, healthy.id);
+    repository.touchProfileUsage('kimi', picked.profileId);
+    assert.equal(repository.pickAvailableProfile('kimi').id, healthy.id);
+  });
+});

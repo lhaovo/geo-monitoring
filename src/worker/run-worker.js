@@ -192,6 +192,8 @@ export class RunWorker extends EventEmitter {
       throw error;
     }
     this.repository.assignPlatformRunProfile(platformRun.id, profile.profileId);
+    // 立刻记一次使用时间，下一条任务就会轮到另一个账号。
+    this.repository.touchProfileUsage(platformRun.platformId, profile.profileId);
     return { ...platformRun, profileId: profile.profileId };
   }
 

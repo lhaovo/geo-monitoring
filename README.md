@@ -93,7 +93,7 @@ HOST=0.0.0.0 PORT=3030 GEO_BROWSER_PATH=/usr/bin/google-chrome npm start
 | 唯一标识 | Profile ID 由账号派生：手机号归一化为 E.164 形式，其他账号按 NFKC 归一化后取小写，保证同一账号始终映射到同一个 Profile |
 | 存储目录 | `data/profiles/<platform>/<profileId>/chrome`，每个账号一个独立目录，Cookie 与 LocalStorage 互不覆盖 |
 | 健康状态 | `new` 新建未登录、`ready` 可用、`expired` 登录过期、`error` 采集出错、`restricted` 账号受限、`disabled` 已停用 |
-| 自动选取 | 只有 `ready` 状态的 Profile 会被自动选中，避免用未登录账号跑出空回答 |
+| 自动选取 | 只有 `ready` 状态的 Profile 会被自动选中，并按「最久未使用优先」在同平台的多个账号间轮转，避免配额与风控计数全压在一个号上 |
 | 缺登录态 | 平台没有账号、或没有 `ready` 的账号时，任务以 `login_required` 直接失败并给出中文提示，不会静默重试，也不会退回平台默认目录 |
 | 任务成功 | 采集成功后自动把该 Profile 标记为 `ready` 并刷新最近使用时间 |
 | 网页端登录 | 「平台与登录状态」页面左侧选「全部平台」或单个平台、右侧管账号，右上角「添加账号」即可创建登录态并打开登录窗口，关闭窗口后自动复验登录结果 |

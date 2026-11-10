@@ -1,7 +1,7 @@
 ﻿import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { resolveBrowserExecutable } from '../browser.js';
+import { browserLaunchOptions } from '../browser.js';
 import { captureCitations } from '../citations.js';
 import { guardAgainstInterruption } from '../platforms/base.js';
 import { createPlatformRunArtifacts, relativeArtifactPath } from './artifacts.js';
@@ -82,11 +82,8 @@ export async function executePlatformRun({ platformRun, adapter, paths, mode, ap
 async function runPlatformRun({ platformRun, adapter, paths, mode, appendSearchPrompt, emit, signal, attemptLabel = '' }) {
   throwIfAborted(signal);
   const artifacts = await createPlatformRunArtifacts(paths, platformRun.runId, platformRun.id, adapter.id, platformRun.profileId);
-  const browserContext = await chromium.launchPersistentContext(artifacts.profileDirectory, {
-    executablePath: resolveBrowserExecutable(),
-    headless: mode === 'headless',
-    viewport: { width: 1440, height: 960 },
-  });
+  const browserContext = await chromium.launchPersistentContext(artifacts.profileDirectory,
+    browserLaunchOptions({ headless: mode === 'headless' }));
   let abortClosePromise = null;
   const closeOnAbort = () => {
     abortClosePromise ??= browserContext.close().catch(() => undefined);

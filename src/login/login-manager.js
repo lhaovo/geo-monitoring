@@ -1,5 +1,5 @@
 ﻿import { chromium } from 'playwright';
-import { resolveBrowserExecutable } from '../browser.js';
+import { browserLaunchOptions } from '../browser.js';
 import { describeAuthentication } from './authentication.js';
 import { getPlatformAdapter } from '../platforms/index.js';
 import { profilePaths } from '../profiles/profile-paths.js';
@@ -24,12 +24,7 @@ function now() {
 }
 
 async function defaultOpenContext({ userDataDir, entryUrl }) {
-  const executablePath = resolveBrowserExecutable();
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    executablePath,
-    headless: false,
-    viewport: { width: 1440, height: 960 },
-  });
+  const context = await chromium.launchPersistentContext(userDataDir, browserLaunchOptions({ headless: false }));
   const page = context.pages()[0] ?? await context.newPage();
   try {
     await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });

@@ -398,6 +398,15 @@ export class GeoRepository {
     const run = this.getRun(runId);
     const platformRuns = this.database.prepare(`SELECT pr.*, p.text AS prompt_text
       FROM platform_runs pr JOIN prompts p ON p.id = pr.prompt_id WHERE pr.run_id = ? ORDER BY pr.created_at ASC`).all(runId).map(mapPlatformRun);
+    // 带上本次监测使用的账号：Profile 标识只是绑定键，
+    // 账号与备注才能让人一眼看出这条数据是哪个号跑出来的。
+    const profileByBinding = new Map(this.listProfiles().map((profile) => [`${profile.platformId}|${profile.profileId}`, profile]));
+    for (const item of platformRuns) {
+      const profile = item.profileId ? profileByBinding.get(`${item.platformId}|${item.profileId}`) : null;
+      item.account = profile?.account ?? '';
+      item.accountLabel = profile?.label ?? '';
+      item.accountHealth = profile?.health ?? '';
+    }
     const answerByPlatformRunId = new Map();
     const answerRows = this.database.prepare(`SELECT a.* FROM answers a JOIN platform_runs pr
       ON pr.id = a.platform_run_id WHERE pr.run_id = ?`).all(runId);

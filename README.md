@@ -234,14 +234,14 @@ data/
 
 详细方案见 [docs/remote-browser-login.md](docs/remote-browser-login.md)。
 
-该文档写于单 Profile 时代，与当前实现有出入，阅读时注意：
+该文档写于单 Profile 时代，已按当前实现修订：文档第 0 节列出了它与现状的逐项差异，锁的粒度也已改为账号级。要点如下：
 
 | 文档描述 | 当前实现 |
 | --- | --- |
 | `data/profiles/<platform>` | `data/profiles/<platform>/<profileId>/chrome`，每个账号一个独立目录 |
 | 平台级锁 `acquire(platformId, ...)` | 尚未实现；多账号下正确的粒度应是账号级，否则会抵消多账号的并行收益 |
 | `/api/platforms/:platformId/login-session` | `POST /api/login-sessions`、`GET /api/login-sessions`、`POST /api/login-sessions/:sessionId/close` |
-| 尚未实现远端登录 API 与会话管理器 | 会话管理器 `src/login/login-manager.js` 与 `inspectLoginState` 已实现，缺的是远程画面通道和平台锁 |
+| 尚未实现远端登录 API 与会话管理器 | 会话管理器 `src/login/login-manager.js` 与 `inspectLoginState` 已实现，缺的是远程画面通道和账号级锁 |
 
 ## 已知限制
 

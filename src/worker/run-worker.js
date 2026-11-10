@@ -9,6 +9,16 @@ export const DEFAULT_CHALLENGE_THRESHOLD = 3;
 export const DEFAULT_CHALLENGE_COOLDOWN_MS = 30 * 60_000;
 // 平台繁忙时提交的问题不会得到回答，第一次就该让平台歇一会儿。
 export const DEFAULT_BUSY_COOLDOWN_MS = 10 * 60_000;
+// 平台一个可用账号都没有时立刻熔断：这种不可用重试没有意义，
+// 必须停下来等人工重新登录，否则整批检查会被瞬间判成失败。
+export const DEFAULT_NO_ACCOUNT_COOLDOWN_MS = 30 * 60_000;
+
+// 熔断原因的文案：不同维度给操作员看的话不一样。
+function describeCooldownKind(kind) {
+  if (kind === 'busy') return '平台当前繁忙';
+  if (kind === 'no_account') return '没有可用登录账号';
+  return '连续遇到验证码';
+}
 // 撞过验证码之后，该平台在这段时间内直接改用有头模式，
 // 避免每条问题都走「无头失败 → 有头重跑」而重复提交两次。
 export const DEFAULT_MANUAL_WINDOW_MS = 30 * 60_000;
@@ -42,13 +52,37 @@ export class RunWorker extends EventEmitter {
       return;
     }
     state.cancelling = true;
+    // 立刻唤醒调度循环，别让取消等到下一次轮询才生效。
+    state.wakeup?.();
     for (const controller of state.controllers) controller.abort();
     const activeTasks = [...state.tasks];
-    if (!activeTasks.length) return;
+    if (!activeTasks.length) {
+      await this.waitForRunFinished(state);
+      return;
+    }
     await Promise.race([
       Promise.allSettled(activeTasks),
       new Promise((resolve) => setTimeout(resolve, 5_000)),
     ]);
+    // 任务状态要等调度循环真正收尾之后才是最终值。
+    await this.waitForRunFinished(state);
+  }
+
+  // 等待本轮任务收尾（含最终状态落库），最多等 5 秒。
+  waitForRunFinished(state) {
+    if (!state.finished) return Promise.resolve();
+    return Promise.race([
+      state.finished,
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
+    ]);
+  }
+
+  // 调度循环的等待：超时兜底，同时允许取消 / 续跑 / 中止立刻唤醒。
+  waitForSupervisor(state, timeoutMs = 300) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { state.wakeup = null; resolve(); }, timeoutMs);
+      state.wakeup = () => { clearTimeout(timer); state.wakeup = null; resolve(); };
+    });
   }
 
   // 收敛没有 Worker 接管的遗留任务：把仍在排队/执行中的检查标记为取消，
@@ -69,6 +103,35 @@ export class RunWorker extends EventEmitter {
       this.emitEvent({ runId: run.id, level: 'error', message: '服务重启，上一次未完成的监控任务已终止。' });
     }
     return orphans.length;
+  }
+
+  // 人工续跑：解除平台熔断，把挂起的检查放回队列并重新拉起该平台的消费循环。
+  // 熔断是平台级的，解除后所有平台都能继续调度。
+  resumePlatform(runId, platformId) {
+    this.repository.clearPlatformCooldown(platformId);
+    const resumed = this.repository.resumeParkedPlatformRuns(runId, platformId);
+    const state = this.activeRunStates.get(runId);
+    if (!state) {
+      this.emitEvent({ runId, level: 'error', message: `${platformId} 的 ${resumed} 项挂起检查已放回队列，但任务当前没有在执行，请重新发起监测。` });
+      return { resumed, running: false };
+    }
+    const wasParked = state.parkedPlatforms?.delete(platformId) ?? false;
+    // 只有真正挂起过的平台才重新拉起消费循环，
+    // 否则同一个平台会出现两个消费者，同时抢占同一个浏览器用户目录。
+    if (wasParked) state.launchPlatform?.(platformId);
+    state.wakeup?.();
+    this.emitEvent({ runId, message: `${platformId} 已手动续跑，恢复执行 ${resumed} 项挂起检查。` });
+    return { resumed, running: true };
+  }
+
+  // 人工中止：放弃该平台在本轮剩余的检查，任务其余平台继续跑完。
+  abortPlatform(runId, platformId) {
+    const aborted = this.repository.abortPlatformRuns(runId, platformId);
+    const state = this.activeRunStates.get(runId);
+    state?.parkedPlatforms?.delete(platformId);
+    state?.wakeup?.();
+    this.emitEvent({ runId, level: 'error', message: `${platformId} 已中止，${aborted} 项检查未执行。` });
+    return { aborted };
   }
 
   enqueue(runId) {
@@ -118,7 +181,9 @@ export class RunWorker extends EventEmitter {
   async processRun(runId) {
     const run = this.repository.getRun(runId);
     if (run.status === 'cancelled' || this.repository.isCancellationRequested(runId)) return;
-    const state = { controllers: new Set(), tasks: new Set(), leases: new Set(), cancelling: false };
+    const state = { controllers: new Set(), tasks: new Set(), leases: new Set(), cancelling: false, wakeup: null, finished: null };
+    // 取消等操作要等任务真正收尾才知道最终状态，这里给出一个完成信号。
+    state.finished = new Promise((resolve) => { state.resolveFinished = resolve; });
     this.activeRunStates.set(runId, state);
     try {
       this.repository.startRun(runId);
@@ -128,11 +193,16 @@ export class RunWorker extends EventEmitter {
       this.emitEvent({ runId, message: `监测任务结束，状态：${completed.status}。` });
     } finally {
       this.activeRunStates.delete(runId);
+      state.resolveFinished?.();
     }
   }
 
   // 动态队列调度：每个平台一个消费循环，循环内不断领取下一条待处理任务，
   // 由全局并发信号量限制同时执行的任务总数。
+  //
+  // 平台撞上熔断时，它的消费循环会把该平台本轮剩余检查挂起并结束；
+  // 此后由人工在任务详情里选择「续跑」还是「中止」，任务在此期间保持运行中，
+  // 不会因为一个平台不可用就把整轮监测提前判成失败。
   async processPlatformQueue(runId, platformIds, concurrency, appendSearchPrompt) {
     let active = 0;
     const waiters = [];
@@ -150,29 +220,56 @@ export class RunWorker extends EventEmitter {
       if (next) next();
     };
 
-    const platformLoops = platformIds.map((platformId) => this.consumePlatformQueue({
-      runId, platformId, appendSearchPrompt, acquire, release,
-    }));
-    await Promise.allSettled(platformLoops);
+    const state = this.activeRunStates.get(runId) ?? {};
+    const running = new Set();
+    const parked = new Set();
+    const launch = (platformId) => {
+      running.add(platformId);
+      void this.consumePlatformQueue({ runId, platformId, appendSearchPrompt, acquire, release })
+        .then((outcome) => {
+          running.delete(platformId);
+          if (outcome?.parked) parked.add(platformId);
+          state.wakeup?.();
+        });
+    };
+    if (state) {
+      state.launchPlatform = launch;
+      state.parkedPlatforms = parked;
+    }
+
+    for (const platformId of platformIds) launch(platformId);
+
+    // 调度循环：所有平台都结束后收尾。只要还有平台挂起等人工，任务就保持运行中。
+    // 取消时也要等在跑的任务收尾，否则会在检查状态还没落库时就算出最终状态。
+    while (true) {
+      if (!running.size && !parked.size) break;
+      if (this.repository.isCancellationRequested(runId) && !running.size) break;
+      await this.waitForSupervisor(state);
+    }
+    // 任务被取消时把挂起的检查一并收尾，避免留下永远悬挂的 parked 记录。
+    if (this.repository.isCancellationRequested(runId)) {
+      for (const platformId of parked) this.repository.abortPlatformRuns(runId, platformId);
+    }
     while (waiters.length) waiters.shift()();
   }
 
   async consumePlatformQueue({ runId, platformId, appendSearchPrompt, acquire, release }) {
     while (!this.repository.isCancellationRequested(runId)) {
-      // 平台处于验证码冷却期时直接退出该平台的消费循环：
-      // 继续跑只会不断撞风控，把账号也搭进去。
+      // 平台处于熔断冷却期时不再领取任务：继续跑只会不断撞风控，把账号也搭进去。
+      // 本轮剩余检查改为挂起，等人工在任务详情里选择续跑还是中止。
       const cooldown = this.repository.getPlatformCooldown(platformId);
       if (cooldown?.coolingDown) {
+        const parked = this.repository.parkPlatformRuns(runId, platformId, cooldown.reason);
         this.emitEvent({
           runId,
           level: 'error',
-          message: `${platformId} 连续遇到验证码，已暂停该平台至 ${cooldown.cooldownUntil}，剩余任务请稍后重新发起监测。`,
+          message: `${platformId} 已熔断（${describeCooldownKind(cooldown.kind)}），剩余 ${parked} 项检查已挂起，请在任务详情里选择续跑或中止。`,
         });
-        return;
+        return { parked: true, cooldown };
       }
       const leaseId = createId();
       const platformRun = this.workQueue.claimNext(runId, platformId, { leaseId });
-      if (!platformRun) return;
+      if (!platformRun) return { parked: false };
 
       await acquire();
       let bound;
@@ -180,6 +277,22 @@ export class RunWorker extends EventEmitter {
         bound = this.bindProfile(platformRun);
       } catch (error) {
         release();
+        if (error.code === 'no_available_account') {
+          // 该平台一个可用账号都没有，属于平台级不可用：必须熔断，
+          // 否则每条检查都会立刻被判失败，整批任务一两分钟内被冲垮。
+          const cooldown = this.repository.recordPlatformNoAccount(platformId, {
+            cooldownMs: DEFAULT_NO_ACCOUNT_COOLDOWN_MS,
+            reason: error.message,
+          });
+          const parked = this.repository.parkPlatformRuns(runId, platformId, error.message);
+          this.emitEvent({
+            runId,
+            platformRunId: platformRun.id,
+            level: 'error',
+            message: `${platformId} ${error.message} 已熔断，剩余 ${parked} 项检查已挂起，请在任务详情里选择续跑或中止。`,
+          });
+          return { parked: true, cooldown };
+        }
         this.repository.failPlatformRun(platformRun.id, error.message);
         this.emitEvent({ runId, platformRunId: platformRun.id, level: 'error', message: error.message });
         continue;
@@ -201,6 +314,7 @@ export class RunWorker extends EventEmitter {
     if (this.repository.isCancellationRequested(runId)) {
       this.emitEvent({ runId, message: '任务已取消，停止启动后续检查。' });
     }
+    return { parked: false };
   }
 
   // 为任务绑定一个可用的登录账号：账号决定浏览器用户数据目录，
@@ -214,7 +328,7 @@ export class RunWorker extends EventEmitter {
     const profile = this.repository.pickAvailableProfile(platformRun.platformId);
     if (!profile) {
       const error = new Error(`${platformRun.platformId} 没有可用的登录账号，请先在「平台与登录」页面添加账号并完成登录。`);
-      error.code = 'login_required';
+      error.code = 'no_available_account';
       throw error;
     }
     this.repository.assignPlatformRunProfile(platformRun.id, profile.profileId);

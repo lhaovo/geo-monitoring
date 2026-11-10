@@ -26,7 +26,15 @@ const SHARE_STATUS_HINTS = {
 
 const STATUS_LABELS = {
   queued: '排队中', running: '执行中', cancelling: '取消中', completed: '已完成', partial_failed: '部分失败', failed: '失败', cancelled: '已取消',
+  parked: '已挂起', skipped: '已跳过',
 };
+
+// 熔断原因的文案：任务详情里要把「为什么停下来」讲清楚。
+function describeCooldownKind(kind) {
+  if (kind === 'busy') return '平台当前繁忙';
+  if (kind === 'no_account') return '没有可用登录账号';
+  return '连续遇到验证码';
+}
 
 function platformLabel(id) { return PLATFORM_META[id]?.label || id || '未知平台'; }
 function statusLabel(status) { return STATUS_LABELS[status] || status || '未知'; }
@@ -202,7 +210,7 @@ function QuestionsPage({ questions, onReload, onNewRun }) {
   </>;
 }
 
-function RunsPage({ runs, activeRun, onOpenRun, onCloseRun, onCancel, onNewRun, onSelectCell }) {
+function RunsPage({ runs, activeRun, onOpenRun, onCloseRun, onCancel, onNewRun, onSelectCell, onResumePlatform, onAbortPlatform, onClearManualWindow }) {
   return <>
     <PageHeader eyebrow="MONITORING RUNS" title="监控任务" description="点击任意任务行即可就地展开或收起详情，查看问题 × 平台结果矩阵。" actions={<button className="button primary" onClick={onNewRun}>＋ 新建任务</button>} />
     <section className="card runs-list">
@@ -216,25 +224,44 @@ function RunsPage({ runs, activeRun, onOpenRun, onCloseRun, onCancel, onNewRun, 
             <div className="run-stats"><span>{run.mentionedChecks} 次提及</span><span>{run.citationCount} 条引用</span></div>
             <div className="run-row-tail">{['queued', 'running'].includes(run.status) && <span className="run-cancel" onClick={(event) => { event.stopPropagation(); onCancel(run.id); }}>{run.cancelRequestedAt ? '取消中…' : '取消'}</span>}<span className="run-chevron" aria-hidden="true" /></div>
           </button>
-          {expanded && <RunDetail run={activeRun} onSelectCell={onSelectCell} onCancel={onCancel} onClose={onCloseRun} />}
+          {expanded && <RunDetail run={activeRun} onSelectCell={onSelectCell} onCancel={onCancel} onClose={onCloseRun} onResumePlatform={onResumePlatform} onAbortPlatform={onAbortPlatform} onClearManualWindow={onClearManualWindow} />}
         </div>;
       }) : <EmptyState title="还没有监控任务" description="选择问题和平台，发起第一轮品牌监控。" action={<button className="button primary" onClick={onNewRun}>发起监控</button>} />}
     </section>
   </>;
 }
 
-function RunDetail({ run, onSelectCell, onCancel, onClose }) {
+function RunDetail({ run, onSelectCell, onCancel, onClose, onResumePlatform, onAbortPlatform, onClearManualWindow }) {
   const grouped = useMemo(() => {
     const map = new Map();
     for (const item of run.platformRuns || []) { if (!map.has(item.promptId)) map.set(item.promptId, { id: item.promptId, prompt: item.prompt, cells: {} }); map.get(item.promptId).cells[item.platformId] = item; }
     return [...map.values()];
   }, [run]);
+  // 熔断的平台在这里手动决定续跑还是中止：
+  // 平台不可用时任务不会自动恢复，剩余检查也不会被直接判成失败，只是挂起等着。
+  // 只列出这一轮里真正还受影响的平台：中止之后不再有挂起检查，就不用再提示。
+  const paused = (run.platformStates || []).filter((item) => item.parked > 0
+    || item.manualWindow
+    || (item.cooldown && (item.queued > 0 || item.running > 0)));
   return <div className="run-detail">
     <div className="detail-header">
       <div><div className="page-eyebrow">TASK DETAIL</div><h3>{formatTime(run.createdAt)} 的监控任务</h3><p>{run.completedChecks}/{run.totalChecks} 检查完成 · {run.mentionedChecks} 个回答提到品牌 · {run.citationCount} 条引用</p></div>
       <div className="detail-actions"><StatusPill status={displayRunStatus(run)} />{['queued', 'running'].includes(run.status) && <button className="button danger-outline" onClick={() => onCancel(run.id)}>{run.cancelRequestedAt ? '取消中…' : '取消任务'}</button>}<button className="button ghost" onClick={onClose}>收起</button></div>
     </div>
     <div className="detail-progress"><div className="progress-line large"><span style={{ width: `${progressPercent(run)}%` }} /></div><span>{progressPercent(run)}%</span></div>
+    {paused.length ? <div className="run-paused-list">
+      {paused.map((item) => <div key={item.platformId} className="run-paused-item">
+        <div className="run-paused-text">
+          <strong>{platformLabel(item.platformId)}{item.cooldown ? ` ${describeCooldownKind(item.cooldown.kind)}` : item.parked ? ' 剩余检查已挂起' : ' 需要人工验证'}</strong>
+          <span>{item.cooldown?.reason || item.manualWindow?.reason || '剩余检查已挂起，等待人工处理。'}{item.parked ? `　·　${item.parked} 项检查挂起` : ''}{item.cooldown?.until ? `　·　熔断至 ${formatTime(item.cooldown.until)}` : ''}</span>
+        </div>
+        <div className="run-paused-actions">
+          {item.manualWindow ? <button className="button secondary" onClick={() => onClearManualWindow?.(item.platformId)}>恢复无头</button> : null}
+          {item.parked || item.cooldown ? <button className="button secondary" onClick={() => onResumePlatform?.(run.id, item.platformId)}>续跑</button> : null}
+          {item.parked || item.cooldown ? <button className="button danger-outline" onClick={() => onAbortPlatform?.(run.id, item.platformId)}>中止</button> : null}
+        </div>
+      </div>)}
+    </div> : null}
     <div className="matrix-wrap"><table className="matrix"><thead><tr><th>监控问题</th>{run.targetPlatforms.map((id) => <th key={id}><PlatformBadge id={id} /></th>)}</tr></thead><tbody>{grouped.map((row, index) => <tr key={row.id}><td><div className="matrix-question"><span className="matrix-index">{String(index + 1).padStart(2, '0')}</span><strong>{row.prompt?.text || '未知问题'}</strong></div></td>{run.targetPlatforms.map((id) => <td key={id}><button className={`matrix-cell ${row.cells[id]?.status || 'queued'}`} onClick={() => row.cells[id] && onSelectCell(row.cells[id])}>{row.cells[id] ? <><StatusPill status={row.cells[id].status} />{row.cells[id].answer ? <span className={row.cells[id].answer.brandMentioned ? 'mention yes' : 'mention'}>{row.cells[id].answer.brandMentioned ? '已提及' : '未提及'}</span> : null}<small title={row.cells[id].answer ? undefined : row.cells[id].errorMessage || '等待执行'}>{row.cells[id].answer ? `${row.cells[id].answer.citations.length} 条来源` : row.cells[id].errorMessage || '等待执行'}</small></> : <span>—</span>}</button></td>)}</tr>)}</tbody></table></div>
   </div>;
 }
@@ -824,32 +851,6 @@ function PlatformsPage({ platforms }) {
     }
   };
 
-  // 人工窗口期间该平台一直用有头模式跑，操作员可以提前解除、恢复无头。
-  const clearManualWindow = async (platformId) => {
-    setError('');
-    setMessage('');
-    try {
-      await api.clearPlatformManualWindow(platformId);
-      setMessage(`${platformLabel(platformId)} 已解除人工验证模式，后续任务恢复无头执行。`);
-      await reload();
-    } catch (cause) {
-      setError(cause.message);
-    }
-  };
-
-  // 平台因验证码被暂停后，允许操作员立即解除冷却、恢复调度。
-  const clearCooldown = async (platformId) => {
-    setError('');
-    setMessage('');
-    try {
-      await api.clearPlatformCooldown(platformId);
-      setMessage(`${platformLabel(platformId)} 已解除验证码暂停，可以继续发起监测。`);
-      await reload();
-    } catch (cause) {
-      setError(cause.message);
-    }
-  };
-
   const closeSession = async (sessionId) => {
     try {
       const session = await api.closeLoginSession(sessionId);
@@ -883,7 +884,7 @@ function PlatformsPage({ platforms }) {
           {platforms.map((item) => {
           const count = profiles.filter((profile) => profile.platformId === item.id).length;
           const ready = profiles.filter((profile) => profile.platformId === item.id && profile.health === 'ready').length;
-          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span>{manualWindows[item.id] ? <span className="platform-side-paused manual">人工</span> : null}{cooldowns[item.id] ? <span className={`platform-side-paused ${cooldowns[item.id].kind === 'busy' ? 'busy' : ''}`}>{cooldowns[item.id].kind === 'busy' ? '繁忙' : '暂停'}</span> : null}<span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
+          return <button key={item.id} className={`platform-side-item ${selected?.id === item.id ? 'active' : ''}`} onClick={() => setSelectedPlatformId(item.id)}><PlatformDot id={item.id} /><span className="platform-side-name">{item.label}</span>{manualWindows[item.id] ? <span className="platform-side-paused manual">人工</span> : null}{cooldowns[item.id] ? <span className={`platform-side-paused ${cooldowns[item.id].kind === 'busy' ? 'busy' : ''}`}>{cooldowns[item.id].kind === 'busy' ? '繁忙' : cooldowns[item.id].kind === 'no_account' ? '无账号' : '暂停'}</span> : null}<span className="platform-side-count">{count ? `${ready}/${count}` : '无'}</span></button>;
         })}</div>
       </aside>
       {showAll || selected ? <section className="card platform-detail">
@@ -895,21 +896,18 @@ function PlatformsPage({ platforms }) {
           ? (platforms.some((item) => cooldowns[item.id])
             ? <div className="platform-cooldown-list">
             {platforms.filter((item) => cooldowns[item.id]).map((item) => <div key={item.id} className="platform-cooldown-notice">
-              <div><strong>{item.label} {cooldowns[item.id]?.kind === 'busy' ? '当前繁忙，已暂停采集' : '已因连续遇到验证码暂停'}</strong><span>暂停至 {formatTime(cooldowns[item.id]?.until)}　·　{cooldowns[item.id]?.reason}</span></div>
-              <button className="button secondary" onClick={() => clearCooldown(item.id).catch(() => undefined)}>立即恢复</button>
+              <div><strong>{item.label} {describeCooldownKind(cooldowns[item.id]?.kind)}，已暂停采集</strong><span>暂停至 {formatTime(cooldowns[item.id]?.until)}　·　{cooldowns[item.id]?.reason}　·　续跑与中止请到「监控任务」详情里操作</span></div>
             </div>)}
           </div>
             : null)
           : cooldown
             ? <div className="platform-cooldown-notice">
-              <div><strong>{cooldown.kind === 'busy' ? '该平台当前繁忙，已暂停采集' : '该平台已因连续遇到验证码暂停'}</strong><span>暂停至 {formatTime(cooldown.until)}　·　{cooldown.reason}</span></div>
-              <button className="button secondary" onClick={() => clearCooldown(selected.id).catch(() => undefined)}>立即恢复</button>
+              <div><strong>该平台{describeCooldownKind(cooldown.kind)}，已暂停采集</strong><span>暂停至 {formatTime(cooldown.until)}　·　{cooldown.reason}　·　续跑与中止请到「监控任务」详情里操作</span></div>
             </div>
             : null}
         {manualWindow
           ? <div className="platform-manual-notice">
-            <div><strong>该平台需要人工验证，已自动改用有头模式</strong><span>持续至 {formatTime(manualWindow.until)}　·　遇到验证码时会在浏览器窗口里等待人工处理</span></div>
-            <button className="button secondary" onClick={() => clearManualWindow(selected.id).catch(() => undefined)}>恢复无头</button>
+            <div><strong>该平台需要人工验证，已自动改用有头模式</strong><span>持续至 {formatTime(manualWindow.until)}　·　遇到验证码时会在浏览器窗口里等待人工处理　·　恢复无头请到「监控任务」详情里操作</span></div>
           </div>
           : null}
 
@@ -1165,12 +1163,38 @@ function App() {
       setError(cause.message);
     }
   };
+  // 熔断的平台在任务详情里手动续跑或中止。
+  const resumeRunPlatform = async (runId, platformId) => {
+    try {
+      await api.resumeRunPlatform(runId, platformId);
+      setActiveRun(await api.getRun(runId));
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+  const abortRunPlatform = async (runId, platformId) => {
+    try {
+      await api.abortRunPlatform(runId, platformId);
+      setActiveRun(await api.getRun(runId));
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
+  // 人工窗口期间该平台一直用有头模式跑，任务详情里可以提前解除。
+  const clearManualWindow = async (platformId) => {
+    try {
+      await api.clearPlatformManualWindow(platformId);
+      setPlatforms((items) => items.map((item) => item.id === platformId ? { ...item, manualWindow: null } : item));
+    } catch (cause) {
+      setError(cause.message);
+    }
+  };
   const currentView = ['overview', 'questions', 'runs', 'sources', 'trends', 'reports', 'platforms'].includes(route.view) ? route.view : 'overview';
   const page = currentView === 'platforms' ? <PlatformsPage platforms={platforms} />
     : !brand ? <EmptyState title="先创建一个品牌" description="品牌是 GEO 监测的主体，添加品牌后再配置监控问题。" action={<button className="button primary" onClick={() => setModal('brand')}>创建品牌</button>} />
     : currentView === 'overview' ? <OverviewPage overview={overview} onNewRun={() => setModal('run')} onOpenRun={openRun} onNavigate={navigate} />
       : currentView === 'questions' ? <QuestionsPage questions={questions} onReload={reloadQuestions} onNewRun={() => setModal('run')} />
-        : currentView === 'runs' ? <RunsPage runs={runs} activeRun={activeRun} onOpenRun={openRun} onCloseRun={closeRun} onCancel={cancelRun} onNewRun={() => setModal('run')} onSelectCell={setDrawerRun} />
+        : currentView === 'runs' ? <RunsPage runs={runs} activeRun={activeRun} onOpenRun={openRun} onCloseRun={closeRun} onCancel={cancelRun} onNewRun={() => setModal('run')} onSelectCell={setDrawerRun} onResumePlatform={resumeRunPlatform} onAbortPlatform={abortRunPlatform} onClearManualWindow={clearManualWindow} />
           : currentView === 'sources' ? <SourcesPage brand={brand} />
               : currentView === 'trends' ? <TrendsPage overview={overview} />
                 : currentView === 'reports' ? <ReportsPage overview={overview} />

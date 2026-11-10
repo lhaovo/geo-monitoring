@@ -13,6 +13,18 @@ async function json(app, options) {
   return { response, body: response.body ? response.json() : null };
 }
 
+// 等待任务里的检查进入期望状态：熔断与挂起都是异步发生的，测试不能假设瞬时完成。
+async function waitForPlatformRun(app, runId, predicate, { timeoutMs = 8000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${runId}` });
+    const platformRun = detail.body.platformRuns[0];
+    if (platformRun && predicate(platformRun, detail.body)) return detail.body;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('等待检查状态超时。');
+}
+
 // 监控任务必须绑定到具体账号，没有可用账号时不会执行，这里为相关平台准备可用登录态。
 async function createReadyProfiles(app, platformIds) {
   for (const platformId of platformIds) {
@@ -488,7 +500,7 @@ test('calculates brand mention rate and keeps source evidence for brand monitori
   }
 });
 
-test('refuses to run when the platform has no ready login profile', async () => {
+test('熔断：没有可用登录账号时挂起剩余检查，而不是批量判失败', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-login-required-'));
   let executed = false;
   const app = buildServer({
@@ -511,12 +523,61 @@ test('refuses to run when the platform has no ready login profile', async () => 
       method: 'POST', url: '/api/runs',
       payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['kimi'] },
     });
+
+    // 没有可用账号时检查不会执行，而是挂起等人工决定。
+    const detail = await waitForPlatformRun(app, run.body.id, (platformRun) => platformRun.status === 'parked');
+    assert.equal(executed, false);
+    assert.match(detail.platformRuns[0].errorMessage, /没有可用的登录账号/);
+    // 熔断原因要带到任务详情，界面据此给出续跑 / 中止入口。
+    const kimi = detail.platformStates.find((item) => item.platformId === 'kimi');
+    assert.equal(kimi.cooldown.kind, 'no_account');
+    assert.equal(kimi.parked, 1);
+
+    // 中止：挂起的检查标记为已跳过，任务才能正常收尾。
+    await json(app, { method: 'POST', url: `/api/runs/${run.body.id}/platforms/kimi/abort`, payload: {} });
+    await app.geo.worker.whenIdle();
+    const aborted = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(aborted.body.platformRuns[0].status, 'skipped');
+    assert.equal(aborted.body.status, 'partial_failed');
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('熔断：人工续跑后剩余检查重新回到队列', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-resume-'));
+  const executed = [];
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async ({ platformRun }) => {
+      executed.push(platformRun.id);
+      return { content: '回答', citations: [], artifacts: [] };
+    },
+  });
+  try {
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '续跑测试' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '需要登录的问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['kimi'] },
+    });
+
+    await waitForPlatformRun(app, run.body.id, (platformRun) => platformRun.status === 'parked');
+    assert.equal(executed.length, 0);
+
+    // 补一个可用账号后再续跑：挂起的检查应重新排队并真正执行。
+    await createReadyProfiles(app, ['kimi']);
+    const resumed = await json(app, { method: 'POST', url: `/api/runs/${run.body.id}/platforms/kimi/resume`, payload: {} });
+    assert.equal(resumed.body.resumed, 1);
     await app.geo.worker.whenIdle();
 
-    assert.equal(executed, false);
     const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
-    assert.equal(detail.body.platformRuns[0].status, 'failed');
-    assert.match(detail.body.platformRuns[0].errorMessage, /没有可用的登录账号/);
+    assert.equal(executed.length, 1);
+    assert.equal(detail.body.platformRuns[0].status, 'completed');
+    assert.equal(detail.body.status, 'completed');
   } finally {
     await app.close();
     await rm(dataDirectory, { recursive: true, force: true });

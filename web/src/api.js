@@ -48,8 +48,10 @@ export const api = {
   listPlatforms: () => request('/api/platforms'),
   listPlatformStatus: () => request('/api/platforms/status'),
   listProfiles: (platformId = '') => request(`/api/profiles${platformId ? `?platformId=${encodeURIComponent(platformId)}` : ''}`),
-  clearPlatformCooldown: (platformId) => request(`/api/platforms/${encodeURIComponent(platformId)}/cooldown/clear`, { method: 'POST', body: '{}' }),
   clearPlatformManualWindow: (platformId) => request(`/api/platforms/${encodeURIComponent(platformId)}/manual-window/clear`, { method: 'POST', body: '{}' }),
+  // 熔断的平台在任务详情里手动决定续跑还是中止。
+  resumeRunPlatform: (runId, platformId) => request(`/api/runs/${encodeURIComponent(runId)}/platforms/${encodeURIComponent(platformId)}/resume`, { method: 'POST', body: '{}' }),
+  abortRunPlatform: (runId, platformId) => request(`/api/runs/${encodeURIComponent(runId)}/platforms/${encodeURIComponent(platformId)}/abort`, { method: 'POST', body: '{}' }),
   createProfile: (body) => request('/api/profiles', { method: 'POST', body: JSON.stringify(body) }),
   updateProfile: (profileId, body) => request(`/api/profiles/${profileId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   disableProfile: (profileId) => request(`/api/profiles/${profileId}/disable`, { method: 'POST' }),

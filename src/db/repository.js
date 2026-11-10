@@ -463,7 +463,24 @@ export class GeoRepository {
       const answer = answerByPlatformRunId.get(row.platform_run_id);
       if (answer) answer.artifacts.push({ id: row.id, kind: row.kind, relativePath: row.relative_path, createdAt: row.created_at });
     }
-    return { ...run, platformRuns: platformRuns.map((platformRun) => ({ ...platformRun, answer: answerByPlatformRunId.get(platformRun.id) ?? null })) };
+    // 熔断状态按平台汇总：任务详情要能看出哪个平台被挂起、为什么挂起，
+    // 并在此基础上提供「续跑 / 中止」两个操作。
+    const platformStates = this.summarizeRunQueue(runId).map((entry) => {
+      const cooldown = this.getPlatformCooldown(entry.platformId);
+      const manualWindow = this.getPlatformManualWindow(entry.platformId);
+      return {
+        ...entry,
+        cooldown: cooldown?.coolingDown
+          ? { kind: cooldown.kind, until: cooldown.cooldownUntil, reason: cooldown.reason }
+          : null,
+        manualWindow: manualWindow?.active ? { until: manualWindow.until, reason: manualWindow.reason } : null,
+      };
+    });
+    return {
+      ...run,
+      platformRuns: platformRuns.map((platformRun) => ({ ...platformRun, answer: answerByPlatformRunId.get(platformRun.id) ?? null })),
+      platformStates,
+    };
   }
 
   getAnswer(answerId) {
@@ -988,9 +1005,13 @@ export class GeoRepository {
 
   finishRun(runId) {
     const statuses = this.database.prepare('SELECT status FROM platform_runs WHERE run_id = ?').all(runId).map((row) => row.status);
+    // skipped 是「平台被人工中止后跳过的检查」：既不是完成也不是失败，
+    // 全部检查都结束时任务算部分完成，如实反映这一轮的实际覆盖度。
+    const settled = new Set(['completed', 'skipped']);
     const status = statuses.length && statuses.every((value) => value === 'completed') ? 'completed'
       : statuses.some((value) => value === 'cancelled') ? 'cancelled'
-        : statuses.some((value) => value === 'completed') ? 'partial_failed' : 'failed';
+        : statuses.length && statuses.every((value) => settled.has(value)) ? 'partial_failed'
+          : statuses.some((value) => value === 'completed') ? 'partial_failed' : 'failed';
     this.database.prepare('UPDATE runs SET status = ?, completed_at = ? WHERE id = ?').run(status, now(), runId);
     return this.getRun(runId);
   }
@@ -1189,6 +1210,12 @@ export class GeoRepository {
     return this.recordPlatformStrike(platformId, { kind: 'busy', threshold, cooldownMs, reason });
   }
 
+  // 平台一个可用登录账号都没有时同样要熔断：这种不可用和验证码、繁忙一样是
+  // 平台级的，继续领取任务只会把整批检查在一两分钟内瞬间判成失败。
+  recordPlatformNoAccount(platformId, { threshold = 1, cooldownMs = 30 * 60_000, reason = '' } = {}) {
+    return this.recordPlatformStrike(platformId, { kind: 'no_account', threshold, cooldownMs, reason });
+  }
+
   // 记录一次平台级熔断。验证码与繁忙是两个维度，各自独立计数：
   // 切换维度时重新开始累计，冷却期间不再累加。
   recordPlatformStrike(platformId, { kind = 'challenge', threshold = 3, cooldownMs = 30 * 60_000, reason = '' } = {}) {
@@ -1311,6 +1338,31 @@ export class GeoRepository {
     return result.changes;
   }
 
+  // 平台熔断后，把该平台在本轮剩余的检查挂起（parked）：
+  // 既不判失败（账号可能马上就能用），也不会再被自动领取，
+  // 等人工在任务详情里选择「续跑」还是「中止」。
+  parkPlatformRuns(runId, platformId, reason = '') {
+    const result = this.database.prepare(`UPDATE platform_runs SET status = 'parked', lease_id = NULL,
+      lease_expires_at = NULL, error_message = ? WHERE run_id = ? AND platform_id = ?
+      AND status IN ('queued', 'running')`).run(reason, runId, platformId);
+    return result.changes;
+  }
+
+  // 人工续跑：挂起的检查放回队列，等待该平台的消费循环重新领取。
+  resumeParkedPlatformRuns(runId, platformId) {
+    const result = this.database.prepare(`UPDATE platform_runs SET status = 'queued', error_message = NULL
+      WHERE run_id = ? AND platform_id = ? AND status = 'parked'`).run(runId, platformId);
+    return result.changes;
+  }
+
+  // 人工中止：放弃该平台在本轮剩余的检查，标记为已跳过，不计入失败。
+  abortPlatformRuns(runId, platformId) {
+    const result = this.database.prepare(`UPDATE platform_runs SET status = 'skipped', lease_id = NULL,
+      lease_expires_at = NULL, completed_at = ?, error_message = '该平台已中止，剩余检查未执行。'
+      WHERE run_id = ? AND platform_id = ? AND status IN ('parked', 'queued')`).run(now(), runId, platformId);
+    return result.changes;
+  }
+
   // 实际执行的浏览器模式可能因为人工窗口而与创建时不同，这里回写真实模式。
   updatePlatformRunMode(platformRunId, mode) {
     this.database.prepare('UPDATE platform_runs SET mode = ? WHERE id = ?').run(mode, platformRunId);
@@ -1334,7 +1386,7 @@ export class GeoRepository {
       FROM platform_runs WHERE run_id = ? GROUP BY platform_id, status`).all(runId);
     const platforms = new Map();
     for (const row of rows) {
-      const entry = platforms.get(row.platform_id) ?? { platformId: row.platform_id, queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+      const entry = platforms.get(row.platform_id) ?? { platformId: row.platform_id, queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0, parked: 0, skipped: 0 };
       entry[row.status] = row.total;
       platforms.set(row.platform_id, entry);
     }

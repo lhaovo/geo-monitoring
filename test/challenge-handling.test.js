@@ -408,8 +408,10 @@ test('平台冷却期间不再领取该平台的任务', async () => {
       });
       const summary = worker.workQueue.summarize(run.id);
       assert.equal(summary[0].running, 0);
-      assert.equal(summary[0].queued, 2);
-      assert.ok(events.some((event) => event.level === 'error' && event.message.includes('暂停该平台')));
+      // 熔断期间剩余检查挂起：既不执行也不判失败，等人工决定续跑还是中止。
+      assert.equal(summary[0].queued, 0);
+      assert.equal(summary[0].parked, 2);
+      assert.ok(events.some((event) => event.level === 'error' && event.message.includes('已熔断')));
     } finally {
       await worker.stop();
     }

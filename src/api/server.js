@@ -99,15 +99,8 @@ export function buildServer({
   }));
 
   // ---- 登录态 Profile ----
-  // 平台因验证码被暂停后，可以手动解除冷却立即恢复调度。
-  app.post('/api/platforms/:platformId/cooldown/clear', async (request) => {
-    getPlatformAdapter(requireString(request.params.platformId, 'platformId'));
-    repo.clearPlatformCooldown(request.params.platformId);
-    return { platformId: request.params.platformId, cleared: true };
-  });
-
   // 平台处于人工窗口时（刚撞过验证码）会一直用有头模式跑，
-  // 操作员可以提前解除，恢复无头模式。
+  // 操作员可以在任务详情里提前解除，恢复无头模式。
   app.post('/api/platforms/:platformId/manual-window/clear', async (request) => {
     getPlatformAdapter(requireString(request.params.platformId, 'platformId'));
     repo.clearPlatformManualWindow(request.params.platformId);
@@ -264,6 +257,25 @@ export function buildServer({
     await runWorker.cancelRun(request.params.runId);
     return repo.getRun(run.id);
   });
+  // 熔断的平台在任务详情里手动决定续跑还是中止：
+  // 续跑会解除熔断并把挂起的检查放回队列，中止则放弃这些检查。
+  // 平台级没有「解除冷却」入口，避免出现「冷却解了但任务不会自己恢复」的半截状态。
+  app.post('/api/runs/:runId/platforms/:platformId/resume', async (request) => {
+    const runId = requireString(request.params.runId, 'runId');
+    const platformId = requireString(request.params.platformId, 'platformId');
+    getPlatformAdapter(platformId);
+    const result = runWorker.resumePlatform(runId, platformId);
+    return { runId, platformId, ...result };
+  });
+
+  app.post('/api/runs/:runId/platforms/:platformId/abort', async (request) => {
+    const runId = requireString(request.params.runId, 'runId');
+    const platformId = requireString(request.params.platformId, 'platformId');
+    getPlatformAdapter(platformId);
+    const result = runWorker.abortPlatform(runId, platformId);
+    return { runId, platformId, ...result };
+  });
+
   app.get('/api/runs/:runId/events', async (request) => repo.listEvents(request.params.runId));
   app.get('/api/answers/:answerId', async (request) => repo.getAnswer(request.params.answerId));
   app.get('/api/answers/:answerId/citations', async (request) => repo.getAnswer(request.params.answerId).citations);

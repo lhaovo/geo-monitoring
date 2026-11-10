@@ -563,3 +563,79 @@ test('binds a ready login profile to the platform run', async () => {
     await rm(dataDirectory, { recursive: true, force: true });
   }
 });
+
+test('cancels a run that no worker is executing so it stops showing as cancelling', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-zombie-cancel-'));
+  const app = buildServer({
+    dataDirectory,
+    executePlatformRun: async () => ({ content: '回答', citations: [], artifacts: [] }),
+  });
+  try {
+    await createReadyProfiles(app, ['kimi']);
+    const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '僵尸任务取消' } });
+    const prompt = await json(app, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '会被中断的问题' },
+    });
+    const run = await json(app, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['kimi'] },
+    });
+    await app.geo.worker.whenIdle();
+
+    // 模拟服务重启：任务卡在 running 且已经请求过取消，内存里没有 Worker 再接管它。
+    const timestamp = new Date().toISOString();
+    app.geo.database.prepare(`UPDATE runs SET status = 'running', completed_at = NULL, cancel_requested_at = ? WHERE id = ?`).run(timestamp, run.body.id);
+    app.geo.database.prepare(`UPDATE platform_runs SET status = 'running', completed_at = NULL WHERE run_id = ?`).run(run.body.id);
+
+    const cancelled = await json(app, { method: 'POST', url: `/api/runs/${run.body.id}/cancel` });
+    assert.equal(cancelled.response.statusCode, 200);
+    assert.equal(cancelled.body.status, 'cancelled');
+    assert.notEqual(cancelled.body.status, 'running');
+    const detail = await json(app, { method: 'GET', url: `/api/runs/${run.body.id}` });
+    assert.equal(detail.body.platformRuns[0].status, 'cancelled');
+  } finally {
+    await app.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('recovers runs left running by a previous process when the server starts', async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-zombie-boot-'));
+  const first = buildServer({
+    dataDirectory,
+    executePlatformRun: async () => ({ content: '回答', citations: [], artifacts: [] }),
+  });
+  let runId = '';
+  try {
+    await createReadyProfiles(first, ['kimi']);
+    const project = await json(first, { method: 'POST', url: '/api/projects', payload: { name: '重启回收' } });
+    const prompt = await json(first, {
+      method: 'POST', url: `/api/projects/${project.body.id}/prompts`, payload: { text: '重启前的问题' },
+    });
+    const run = await json(first, {
+      method: 'POST', url: '/api/runs',
+      payload: { projectId: project.body.id, promptIds: [prompt.body.id], platforms: ['kimi'] },
+    });
+    await first.geo.worker.whenIdle();
+    runId = run.body.id;
+  } finally {
+    await first.close();
+  }
+
+  // 上一个进程被强杀，数据库里留下了仍是 running 的任务。
+  const database = openDatabase(path.join(dataDirectory, 'brand-monitoring.sqlite'));
+  database.prepare(`UPDATE runs SET status = 'running', completed_at = NULL WHERE id = ?`).run(runId);
+  database.prepare(`UPDATE platform_runs SET status = 'running', completed_at = NULL WHERE run_id = ?`).run(runId);
+  database.close();
+
+  const second = buildServer({ dataDirectory, executePlatformRun: async () => ({ content: '回答', citations: [], artifacts: [] }) });
+  try {
+    const detail = await json(second, { method: 'GET', url: `/api/runs/${runId}` });
+    assert.notEqual(detail.body.status, 'running');
+    assert.equal(detail.body.status, 'cancelled');
+    assert.equal(detail.body.platformRuns[0].status, 'cancelled');
+  } finally {
+    await second.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});

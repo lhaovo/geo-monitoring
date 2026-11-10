@@ -33,6 +33,8 @@ export function buildServer({
   const ownedDatabase = database ?? openDatabase(paths.databasePath);
   const repo = repository ?? new GeoRepository(ownedDatabase);
   const runWorker = worker ?? new RunWorker({ repository: repo, paths, execute: executePlatformRun });
+  // 服务重启后回收上一次遗留的僵尸任务，避免它们永远挂在「执行中 / 取消中」。
+  runWorker.recoverInterruptedRuns?.();
   const app = Fastify({ logger });
   const loginManager = providedLoginManager ?? new LoginManager({ repository: repo, paths });
 

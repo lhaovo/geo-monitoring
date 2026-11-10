@@ -1143,6 +1143,14 @@ function App() {
   useEffect(() => { if (!brand) return; if (['overview', 'trends', 'reports'].includes(route.view)) refreshOverview().catch((cause) => setError(cause.message)); }, [brand?.id, route.view]);
   useEffect(() => { if (route.runId) api.getRun(route.runId).then(setActiveRun).catch((cause) => setError(cause.message)); }, [route.runId]);
   useEffect(() => { if (!activeRun || !['queued', 'running'].includes(activeRun.status)) return undefined; const timer = setInterval(() => api.getRun(activeRun.id).then((run) => { setActiveRun(run); setRuns((items) => items.map((item) => item.id === run.id ? run : item)); if (!['queued', 'running'].includes(run.status)) refreshOverview().catch(() => undefined); }).catch(() => undefined), 2500); return () => clearInterval(timer); }, [activeRun?.id, activeRun?.status, refreshOverview]);
+  // 任务列表定期刷新：取消、失败、完成等状态变化要尽快反映到列表里，
+  // 否则列表会一直停留在旧状态（例如永远显示「取消中」）。
+  const hasActiveRuns = runs.some((item) => ['queued', 'running'].includes(item.status));
+  useEffect(() => {
+    if (!brand || !hasActiveRuns) return undefined;
+    const timer = setInterval(() => { api.listRuns(brand.id).then(setRuns).catch(() => undefined); }, 5000);
+    return () => clearInterval(timer);
+  }, [brand?.id, hasActiveRuns]);
 
   const selectBrand = (id) => { const selected = brands.find((item) => item.id === id); setBrand(selected); setActiveRun(null); navigate('overview'); };
   const createBrand = async (body) => { const created = await api.createBrand(body); const next = [created, ...brands]; setBrands(next); setBrand(created); setModal(null); navigate('overview'); };

@@ -34,7 +34,13 @@ export class RunWorker extends EventEmitter {
 
   async cancelRun(runId) {
     const state = this.activeRunStates.get(runId);
-    if (!state) return;
+    if (!state) {
+      // 内存里没有活跃执行状态：这个任务要么还没被 Worker 领取，
+      // 要么是上一次进程崩溃留下的僵尸任务。两种情况都要立刻收尾，
+      // 否则任务会一直停在「取消中」。
+      this.abandonRun(runId, '任务已取消，服务已停止执行该检查。');
+      return;
+    }
     state.cancelling = true;
     for (const controller of state.controllers) controller.abort();
     const activeTasks = [...state.tasks];
@@ -43,6 +49,26 @@ export class RunWorker extends EventEmitter {
       Promise.allSettled(activeTasks),
       new Promise((resolve) => setTimeout(resolve, 5_000)),
     ]);
+  }
+
+  // 收敛没有 Worker 接管的遗留任务：把仍在排队/执行中的检查标记为取消，
+  // 再按检查结果算出最终状态，避免任务永远挂在「执行中 / 取消中」。
+  abandonRun(runId, reason = '服务中断，该检查未完成。') {
+    const current = this.repository.getRun(runId);
+    if (!current || !['queued', 'running'].includes(current.status)) return current;
+    const run = this.repository.abandonRun(runId, reason);
+    this.emitEvent({ runId, message: '任务没有正在执行的浏览器，已直接收尾，不再处于「取消中」。' });
+    return run;
+  }
+
+  // 服务启动时回收上一次进程崩溃或重启遗留的僵尸任务。
+  recoverInterruptedRuns() {
+    const orphans = this.repository.listUnfinishedRuns();
+    for (const run of orphans) {
+      this.repository.abandonRun(run.id, '服务重启，该检查未完成。');
+      this.emitEvent({ runId: run.id, level: 'error', message: '服务重启，上一次未完成的监控任务已终止。' });
+    }
+    return orphans.length;
   }
 
   enqueue(runId) {

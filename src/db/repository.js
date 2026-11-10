@@ -1007,6 +1007,24 @@ export class GeoRepository {
     return Boolean(this.database.prepare('SELECT cancel_requested_at FROM runs WHERE id = ?').get(runId)?.cancel_requested_at);
   }
 
+  // 列出还挂在 queued/running 的任务，启动时用来回收上一次进程遗留的僵尸任务。
+  listUnfinishedRuns() {
+    return this.database.prepare(`SELECT r.*, ${this.runProgressSql()} FROM runs r
+      WHERE r.status IN ('queued', 'running') ORDER BY r.created_at ASC`).all().map(mapRun);
+  }
+
+  // 收敛一个没有 Worker 再接管的遗留任务。
+  // 服务重启后内存里的执行状态会丢失，数据库里仍是 running/queued 的任务再也没人来收尾，
+  // 只能把仍在排队/执行中的检查标记为取消，再按检查结果算出最终状态，
+  // 否则任务会永远停在「执行中 / 取消中」。
+  abandonRun(runId, reason = '服务中断，该检查未完成。') {
+    const run = this.getRun(runId);
+    if (!['queued', 'running'].includes(run.status)) return run;
+    this.database.prepare(`UPDATE platform_runs SET status = 'cancelled', completed_at = ?, error_message = COALESCE(error_message, ?)
+      WHERE run_id = ? AND status IN ('queued', 'running')`).run(now(), reason, runId);
+    return this.finishRun(runId);
+  }
+
   addEvent({ runId, platformRunId = null, level = 'info', message }) {
     const event = { id: createId(), runId, platformRunId, level, message, createdAt: now() };
     this.database.prepare(`INSERT INTO task_events (id, run_id, platform_run_id, level, message, created_at)

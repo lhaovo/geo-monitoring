@@ -2,6 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
+import compress from '@fastify/compress';
 import { openDatabase } from '../db/database.js';
 import { GeoRepository } from '../db/repository.js';
 import { createPaths } from '../config/paths.js';
@@ -20,7 +21,7 @@ function requireBody(body) {
   return body;
 }
 
-export function buildServer({
+export async function buildServer({
   dataDirectory,
   database,
   repository,
@@ -36,6 +37,14 @@ export function buildServer({
   // 服务重启后回收上一次遗留的僵尸任务，避免它们永远挂在「执行中 / 取消中」。
   runWorker.recoverInterruptedRuns?.();
   const app = Fastify({ logger });
+  // 响应压缩：任务详情 JSON 单次可达数 MB、证据 HTML 可达 1 MB 以上，
+  // 而前端在任务运行期间每 2.5 秒就会拉一次任务详情。
+  // 插件按 Accept-Encoding 自动协商（zstd > br > gzip），静态证据文件同样受益；
+  // 压缩时插件会自动摘除 content-length，避免浏览器按压缩前的长度截断响应。
+  //
+  // 这里必须 await：Fastify 的钩子在路由注册时就确定了，
+  // 插件晚于路由加载的话，同步注册的接口不会带上压缩。
+  await app.register(compress, { global: true, threshold: 1024 });
   const loginManager = providedLoginManager ?? new LoginManager({ repository: repo, paths });
 
   app.decorate('geo', { paths, database: ownedDatabase, repository: repo, worker: runWorker, loginManager });
@@ -319,7 +328,7 @@ export function buildServer({
 }
 
 export async function startServer(options = {}) {
-  const app = buildServer(options);
+  const app = await buildServer(options);
   const port = Number(process.env.PORT ?? 3030);
   await app.listen({ host: process.env.HOST ?? '127.0.0.1', port });
   return app;

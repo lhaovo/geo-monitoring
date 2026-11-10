@@ -43,7 +43,7 @@ test('通过接口新增账号并打开登录窗口', async () => {
     paths: createPaths({ dataDirectory }),
     openContext: async () => fakeContext(),
   });
-  const app = buildServer({ dataDirectory, database, repository, loginManager: manager });
+  const app = await buildServer({ dataDirectory, database, repository, loginManager: manager });
   try {
     const created = await json(app, {
       method: 'POST', url: '/api/login-sessions',
@@ -81,7 +81,7 @@ test('通过接口新增账号并打开登录窗口', async () => {
 
 test('登录接口拒绝未知平台', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-login-api-'));
-  const app = buildServer({ dataDirectory });
+  const app = await buildServer({ dataDirectory });
   try {
     const result = await json(app, {
       method: 'POST', url: '/api/login-sessions',
@@ -104,7 +104,7 @@ test('带 content-type 的空请求体也能关闭登录窗口', async () => {
     paths: createPaths({ dataDirectory }),
     openContext: async () => fakeContext(),
   });
-  const app = buildServer({ dataDirectory, database, repository, loginManager: manager });
+  const app = await buildServer({ dataDirectory, database, repository, loginManager: manager });
   try {
     const created = await json(app, {
       method: 'POST', url: '/api/login-sessions',

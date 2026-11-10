@@ -40,7 +40,7 @@ test('creates a project, queues a run, and persists an answer with citations', a
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
   const executedModes = [];
   const executedSearchHints = [];
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async ({ platformRun, mode, appendSearchPrompt }) => {
       executedModes.push([platformRun.platformId, mode]);
@@ -121,7 +121,7 @@ test('runs a global concurrency pool while serializing each platform', async () 
   const activePlatforms = new Set();
   const activePromptCounts = new Map();
   const firstPromptId = { value: null };
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async ({ platformRun }) => {
       if (activePlatforms.has(platformRun.platformId)) samePlatformOverlap = true;
@@ -184,7 +184,7 @@ test('force-cancels active browser work and marks the run immediately', async ()
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-cancel-'));
   let executionStarted = false;
   let abortObserved = false;
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async ({ signal }) => {
       executionStarted = true;
@@ -275,7 +275,7 @@ test('migrates an existing SQLite platform_runs table to platform-level modes', 
 
 test('rejects a run containing an unsupported platform before it enters the queue', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
-  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  const app = await buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
   try {
     const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '项目' } });
     const prompt = await json(app, {
@@ -295,7 +295,7 @@ test('rejects a run containing an unsupported platform before it enters the queu
 
 test('rejects a mode configured for a platform outside the task', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
-  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  const app = await buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
   try {
     const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '项目' } });
     const prompt = await json(app, {
@@ -320,7 +320,7 @@ test('rejects a mode configured for a platform outside the task', async () => {
 
 test('validates run concurrency between one and six', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-concurrency-validation-'));
-  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  const app = await buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
   try {
     const project = await json(app, { method: 'POST', url: '/api/projects', payload: { name: '并发校验' } });
     const prompt = await json(app, {
@@ -347,7 +347,7 @@ test('validates run concurrency between one and six', async () => {
 
 test('uses headed mode only for Doubao by default', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-platform-defaults-'));
-  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  const app = await buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
   try {
     const status = await json(app, { method: 'GET', url: '/api/platforms/status' });
     const modes = Object.fromEntries(status.body.map((platform) => [platform.id, platform.defaultMode]));
@@ -363,7 +363,7 @@ test('uses headed mode only for Doubao by default', async () => {
 
 test('reports the profile summary for every platform', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-platform-status-'));
-  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  const app = await buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
   try {
     const created = await json(app, {
       method: 'POST', url: '/api/profiles',
@@ -393,7 +393,7 @@ test('reports the profile summary for every platform', async () => {
 
 test('stores the share link collected for a platform run', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-share-'));
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async () => ({
       content: '回答内容',
@@ -428,7 +428,7 @@ test('serves evidence only from the dedicated artifacts directory', async () => 
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-api-'));
   await mkdir(path.join(dataDirectory, 'artifacts', 'run-1'), { recursive: true });
   await writeFile(path.join(dataDirectory, 'artifacts', 'run-1', 'evidence.txt'), 'evidence', 'utf8');
-  const app = buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
+  const app = await buildServer({ dataDirectory, executePlatformRun: async () => ({}) });
   try {
     const response = await app.inject({ method: 'GET', url: '/artifacts/run-1/evidence.txt' });
     assert.equal(response.statusCode, 200);
@@ -443,7 +443,7 @@ test('serves evidence only from the dedicated artifacts directory', async () => 
 
 test('calculates brand mention rate and keeps source evidence for brand monitoring', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-brand-'));
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async () => ({
       content: '这类需求可以考虑千威，回答同时保留原始来源。',
@@ -503,7 +503,7 @@ test('calculates brand mention rate and keeps source evidence for brand monitori
 test('熔断：没有可用登录账号时挂起剩余检查，而不是批量判失败', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-login-required-'));
   let executed = false;
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async () => {
       executed = true;
@@ -548,7 +548,7 @@ test('熔断：没有可用登录账号时挂起剩余检查，而不是批量�
 test('熔断：人工续跑后剩余检查重新回到队列', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-resume-'));
   const executed = [];
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async ({ platformRun }) => {
       executed.push(platformRun.id);
@@ -587,7 +587,7 @@ test('熔断：人工续跑后剩余检查重新回到队列', async () => {
 test('binds a ready login profile to the platform run', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-profile-binding-'));
   let boundProfileId = '';
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async ({ platformRun }) => {
       boundProfileId = platformRun.profileId;
@@ -627,7 +627,7 @@ test('binds a ready login profile to the platform run', async () => {
 
 test('cancels a run that no worker is executing so it stops showing as cancelling', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-zombie-cancel-'));
-  const app = buildServer({
+  const app = await buildServer({
     dataDirectory,
     executePlatformRun: async () => ({ content: '回答', citations: [], artifacts: [] }),
   });
@@ -662,7 +662,7 @@ test('cancels a run that no worker is executing so it stops showing as cancellin
 
 test('recovers runs left running by a previous process when the server starts', async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'geo-monitoring-zombie-boot-'));
-  const first = buildServer({
+  const first = await buildServer({
     dataDirectory,
     executePlatformRun: async () => ({ content: '回答', citations: [], artifacts: [] }),
   });
@@ -689,7 +689,7 @@ test('recovers runs left running by a previous process when the server starts', 
   database.prepare(`UPDATE platform_runs SET status = 'running', completed_at = NULL WHERE run_id = ?`).run(runId);
   database.close();
 
-  const second = buildServer({ dataDirectory, executePlatformRun: async () => ({ content: '回答', citations: [], artifacts: [] }) });
+  const second = await buildServer({ dataDirectory, executePlatformRun: async () => ({ content: '回答', citations: [], artifacts: [] }) });
   try {
     const detail = await json(second, { method: 'GET', url: `/api/runs/${runId}` });
     assert.notEqual(detail.body.status, 'running');
